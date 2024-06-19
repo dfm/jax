@@ -48,21 +48,26 @@ class CustomPrimitive(core.Primitive):
     call_jaxpr = core.ClosedJaxpr(pe.convert_constvars_jaxpr(jaxpr), ())
     out_tree = out_tree()
 
-    jvp = getattr(self.spec, "jvp", functools.partial(default_jvp, self.name))
-    jvp = flatten_jvp(lu.wrap_init(jvp), len(consts), in_tree, out_tree, kwargs)
+    jvp = getattr(self.spec, "jvp", None)
+    if jvp is not None:
+      jvp = flatten_jvp(lu.wrap_init(jvp), len(consts), in_tree, out_tree,
+                        kwargs)
+      jvp = Rule("Jvp", jvp)
 
-    transpose = getattr(self.spec, "transpose",
-                        functools.partial(default_transpose, self.name))
-    transpose = flatten_transpose(lu.wrap_init(transpose), len(consts), in_tree,
-                                  out_tree, kwargs)
+    transpose = getattr(self.spec, "transpose", None)
+    if transpose is not None:
+      transpose = flatten_transpose(lu.wrap_init(transpose), len(consts),
+                                    in_tree, out_tree, kwargs)
+      transpose = Rule("Transpose", transpose)
 
-    vmap = getattr(self.spec, "vmap", functools.partial(default_vmap, self.name))
-    vmap = flatten_vmap(lu.wrap_init(vmap), len(consts), in_tree, out_tree, kwargs)
+    vmap = getattr(self.spec, "vmap", None)
+    if vmap is not None:
+      vmap = flatten_vmap(lu.wrap_init(vmap), len(consts), in_tree, out_tree,
+                          kwargs)
+      vmap = Rule("Vmap", vmap)
 
     out_flat = self.bind(*consts, *args_flat, call_jaxpr=call_jaxpr,
-                         jvp=Rule("Jvp", jvp),
-                         transpose=Rule("Transpose", transpose),
-                         vmap=Rule("Vmap", vmap))
+                         jvp=jvp, transpose=transpose, vmap=vmap)
 
     return tree_unflatten(out_tree, out_flat)
 
@@ -100,9 +105,11 @@ def build_custom_primitive(spec, *, name: str | None = None) -> CustomPrimitive:
   prim.def_impl(custom_primitive_impl)
   prim.def_effectful_abstract_eval(custom_primitive_abstract_eval)
   mlir.register_lowering(prim, custom_primitive_lowering)
-  ad.primitive_jvps[prim] = custom_primitive_jvp
-  ad.primitive_transposes[prim] = custom_primitive_transpose
-  batching.primitive_batchers[prim] = custom_primitive_batching
+  ad.primitive_jvps[prim] = functools.partial(custom_primitive_jvp, name)
+  ad.primitive_transposes[prim] = functools.partial(custom_primitive_transpose,
+                                                    name)
+  batching.primitive_batchers[prim] = functools.partial(
+      custom_primitive_batching, name)
 
   return prim
 
@@ -126,12 +133,6 @@ def custom_primitive_lowering(ctx, *args, call_jaxpr: core.ClosedJaxpr, **_):
   return out
 
 
-def default_jvp(name, primals, tangents, **kwargs):
-  del primals, tangents, kwargs
-  raise NotImplementedError(
-      f"'jvp' not implemented for custom primitive '{name}'")
-
-
 @lu.transformation
 def flatten_jvp(num_consts, in_tree, out_tree, kwargs, primals, tangents):
   _, primals = split_list(primals, [num_consts])
@@ -147,16 +148,13 @@ def flatten_jvp(num_consts, in_tree, out_tree, kwargs, primals, tangents):
   yield primals_out, tangents_out
 
 
-def custom_primitive_jvp(primals, tangents, call_jaxpr: core.ClosedJaxpr,
-                         jvp: lu.WrappedFun, **_):
+def custom_primitive_jvp(name: str, primals, tangents,
+                         call_jaxpr: core.ClosedJaxpr, jvp: Rule | None, **_):
   del call_jaxpr
+  if jvp is None:
+    raise NotImplementedError(
+        f"'jvp' not implemented for custom primitive '{name}'")
   return jvp.call_wrapped(primals, tangents)
-
-
-def default_transpose(name, cts, *args, **kwargs):
-  del cts, args, kwargs
-  raise NotImplementedError(
-      f"'transpose' not implemented for custom primitive '{name}'")
 
 
 @lu.transformation
@@ -170,16 +168,14 @@ def flatten_transpose(num_consts, in_tree, out_tree, kwargs, cts_in, *args):
   yield [None] * num_consts + cts_out
 
 
-def custom_primitive_transpose(cts_in, *args, call_jaxpr: core.ClosedJaxpr,
-                               jvp: lu.WrappedFun, transpose: lu.WrappedFun, **_):
+def custom_primitive_transpose(name: str, cts_in, *args,
+                               call_jaxpr: core.ClosedJaxpr, jvp: Rule | None,
+                               transpose: Rule | None, **_):
   del call_jaxpr, jvp
+  if transpose is None:
+    raise NotImplementedError(
+        f"'transpose' not implemented for custom primitive '{name}'")
   return transpose.call_wrapped(cts_in, *args)
-
-
-def default_vmap(name, args, dims, **kwargs):
-  del args, dims, kwargs
-  raise NotImplementedError(
-      f"'vmap' not implemented for custom primitive '{name}'")
 
 
 @lu.transformation
@@ -201,9 +197,11 @@ def flatten_vmap(num_consts, in_tree, out_tree, kwargs, args, dims):
   yield out, [0 if b else not_mapped for b in batched]
 
 
-def custom_primitive_batching(args, dims, *, call_jaxpr: core.ClosedJaxpr,
-                              jvp: lu.WrappedFun, transpose: lu.WrappedFun,
-                              vmap: lu.WrappedFun, **_):
+def custom_primitive_batching(name: str, args, dims, *,
+                              call_jaxpr: core.ClosedJaxpr, jvp: Rule | None,
+                              transpose: Rule | None, vmap: Rule | None, **_):
   del call_jaxpr, jvp, transpose
+  if vmap is None:
+    raise NotImplementedError(
+        f"'vmap' not implemented for custom primitive '{name}'")
   return vmap.call_wrapped(args, dims)
-
