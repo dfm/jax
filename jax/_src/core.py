@@ -944,6 +944,11 @@ class EvalTrace(Trace):
     with new_sublevel():
       return fun.call_wrapped(*tracers)
 
+  def process_custom_primitive(self, primitive, tracers, fun, *_):
+    del primitive
+    with new_sublevel():
+      return fun.call_wrapped(*tracers)
+
 
 class MainTrace:
   level: int

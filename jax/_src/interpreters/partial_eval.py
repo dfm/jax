@@ -2167,6 +2167,24 @@ class DynamicJaxprTrace(core.Trace):
   def post_process_custom_jvp_call(self, out_tracers, _):
     assert False  # unreachable
 
+  def process_custom_primitive(self, prim, tracers, fun, jvp, *_):
+    in_avals = [t.aval for t in tracers]
+    with core.new_sublevel():
+      fun_jaxpr, out_avals, consts, () = trace_to_subjaxpr_dynamic(fun, self.main, in_avals)
+    closed_fun_jaxpr = core.ClosedJaxpr(convert_constvars_jaxpr(fun_jaxpr), ())
+    main_ = ref(self.main)
+    out_tracers = [DynamicJaxprTracer(self, a) for a in out_avals]
+    invars = map(self.getvar, tracers)
+    constvars = map(self.getvar, map(self.instantiate_const, consts))
+    outvars = map(self.makevar, out_tracers)
+    eqn = new_jaxpr_eqn([*constvars, *invars], outvars, prim,
+                        dict(call_jaxpr=closed_fun_jaxpr,
+                             num_consts=len(consts)),
+                        fun_jaxpr.effects,
+                        source_info_util.current())
+    self.frame.add_eqn(eqn)
+    return out_tracers
+
   def process_custom_vjp_call(self, prim, fun, fwd, bwd, tracers, out_trees,
                               symbolic_zeros):
     in_avals = [t.aval for t in tracers]

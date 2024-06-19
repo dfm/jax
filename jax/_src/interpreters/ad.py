@@ -387,6 +387,10 @@ class JVPTrace(Trace):
   def post_process_custom_jvp_call(self, out_tracers, _):
     raise CustomJVPException()
 
+  def process_custom_primitive(self, primitive, tracers, fun, jvp, *_):
+    del primitive, fun
+    return self.process_custom_jvp_call(None, None, jvp, tracers, symbolic_zeros=False)
+
   def process_custom_vjp_call(self, _, __, fwd, bwd, tracers, out_trees,
                               symbolic_zeros):
     primals_in, tangents_in = unzip2((t.primal, t.tangent) for t in tracers)
