@@ -270,3 +270,10 @@ def custom_primitive_vmap(name: str, args, dims, call_jaxpr: core.ClosedJaxpr,
     raise NotImplementedError(
         f"'vmap' not implemented for custom primitive '{name}'")
   return vmap.call_wrapped(args, dims)
+
+
+# def vectorized_vmap(fun, batched, *args, **kwargs):
+#   batched_flat, _ = tree_flatten(batched)
+#   assert all(batched_flat[0] == b for b in batched_flat[1:]), "todo err"
+#   out = fun(*args, **kwargs)
+#   return out, tree_map(lambda _: batched_flat[0], tree_structure(out))
