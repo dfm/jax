@@ -59,10 +59,25 @@ class CustomPrimitive(core.Primitive):
     vmap = getattr(self.spec, "vmap", functools.partial(default_vmap, self.name))
     vmap = flatten_vmap(lu.wrap_init(vmap), len(consts), in_tree, out_tree, kwargs)
 
-    out_flat = self.bind(*consts, *args_flat, call_jaxpr=call_jaxpr, jvp=jvp,
-                         transpose=transpose, vmap=vmap)
+    out_flat = self.bind(*consts, *args_flat, call_jaxpr=call_jaxpr,
+                         jvp=Rule("Jvp", jvp),
+                         transpose=Rule("Transpose", transpose),
+                         vmap=Rule("Vmap", vmap))
 
     return tree_unflatten(out_tree, out_flat)
+
+
+class Rule:
+  __slots__ = ["rule_type", "fun"]
+  def __init__(self, rule_type: str, fun: lu.WrappedFun):
+    self.rule_type = rule_type
+    self.fun = fun
+
+  def __repr__(self) -> str:
+    return f"CustomPrimitive{self.rule_type}Rule"
+
+  def call_wrapped(self, *args, **kwargs):
+    return self.fun.call_wrapped(*args, **kwargs)
 
 
 def build_custom_primitive(spec, *, name: str | None = None) -> CustomPrimitive:
@@ -191,3 +206,4 @@ def custom_primitive_batching(args, dims, *, call_jaxpr: core.ClosedJaxpr,
                               vmap: lu.WrappedFun, **_):
   del call_jaxpr, jvp, transpose
   return vmap.call_wrapped(args, dims)
+
