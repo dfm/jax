@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
+from __future__ import annotations
+
+from functools import partial, update_wrapper
 
 from jax._src import api_util
 from jax._src import core
@@ -22,6 +24,7 @@ from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.interpreters.batching import not_mapped
+from jax._src.lax.lax import tie_p
 from jax._src.tree_util import tree_flatten, tree_unflatten
 from jax._src.util import moveaxis, safe_map, safe_zip, split_list
 
@@ -34,7 +37,7 @@ class CustomPrimitive(core.Primitive):
 
   def __init__(self, name: str, spec):
     super().__init__(name)
-    functools.update_wrapper(self, spec)
+    update_wrapper(self, spec)
     self.spec = spec
 
   def __call__(self, *args, **kwargs):
@@ -52,22 +55,37 @@ class CustomPrimitive(core.Primitive):
     if jvp is not None:
       jvp = flatten_jvp(lu.wrap_init(jvp), len(consts), in_tree, out_tree,
                         kwargs)
-      jvp = Rule("Jvp", jvp)
+      jvp = Rule("jvp", jvp)
+
+    vjp_fwd = getattr(self.spec, "vjp_fwd", None)
+    vjp_bwd = None
+    res_tree = None
+    if vjp_fwd is not None:
+      vjp_fwd, res_tree = flatten_vjp_fwd(
+          lu.wrap_init(vjp_fwd), len(consts), in_tree, out_tree, kwargs,
+          call_jaxpr.out_avals)
+      vjp_fwd = Rule("vjp_fwd", vjp_fwd)
+
+      vjp_bwd = self.spec.vjp_bwd
+      vjp_bwd = flatten_vjp_bwd(lu.wrap_init(vjp_bwd), len(consts), in_tree,
+                                out_tree, kwargs, res_tree)
+      vjp_bwd = Rule("vjp_bwd", vjp_bwd)
 
     transpose = getattr(self.spec, "transpose", None)
     if transpose is not None:
       transpose = flatten_transpose(lu.wrap_init(transpose), len(consts),
                                     in_tree, out_tree, kwargs)
-      transpose = Rule("Transpose", transpose)
+      transpose = Rule("transpose", transpose)
 
     vmap = getattr(self.spec, "vmap", None)
     if vmap is not None:
       vmap = flatten_vmap(lu.wrap_init(vmap), len(consts), in_tree, out_tree,
                           kwargs)
-      vmap = Rule("Vmap", vmap)
+      vmap = Rule("vmap", vmap)
 
     out_flat = self.bind(*consts, *args_flat, call_jaxpr=call_jaxpr,
-                         jvp=jvp, transpose=transpose, vmap=vmap)
+                         jvp=jvp, vjp_fwd=vjp_fwd, vjp_bwd=vjp_bwd,
+                         res_tree=res_tree, transpose=transpose, vmap=vmap)
 
     return tree_unflatten(out_tree, out_flat)
 
@@ -79,7 +97,7 @@ class Rule:
     self.fun = fun
 
   def __repr__(self) -> str:
-    return f"CustomPrimitive{self.rule_type}Rule"
+    return f"<CustomPrimitive {self.rule_type} rule>"
 
   def call_wrapped(self, *args, **kwargs):
     return self.fun.call_wrapped(*args, **kwargs)
@@ -105,11 +123,9 @@ def build_custom_primitive(spec, *, name: str | None = None) -> CustomPrimitive:
   prim.def_impl(custom_primitive_impl)
   prim.def_effectful_abstract_eval(custom_primitive_abstract_eval)
   mlir.register_lowering(prim, custom_primitive_lowering)
-  ad.primitive_jvps[prim] = functools.partial(custom_primitive_jvp, name)
-  ad.primitive_transposes[prim] = functools.partial(custom_primitive_transpose,
-                                                    name)
-  batching.primitive_batchers[prim] = functools.partial(
-      custom_primitive_batching, name)
+  ad.primitive_jvps[prim] = partial(custom_primitive_jvp, name)
+  ad.primitive_transposes[prim] = partial(custom_primitive_transpose, name)
+  batching.primitive_batchers[prim] = partial(custom_primitive_vmap, name)
 
   return prim
 
@@ -120,6 +136,7 @@ def custom_primitive_impl(*args, call_jaxpr: core.ClosedJaxpr, **_):
 
 def custom_primitive_abstract_eval(*args, call_jaxpr: core.ClosedJaxpr, **_):
   del args
+  # TODO(dfm): Check for allowed effects
   return call_jaxpr.out_avals, call_jaxpr.effects
 
 
@@ -148,9 +165,55 @@ def flatten_jvp(num_consts, in_tree, out_tree, kwargs, primals, tangents):
   yield primals_out, tangents_out
 
 
+@lu.transformation_with_aux
+def flatten_vjp_fwd(num_consts, in_tree, out_tree, kwargs, out_avals, *args):
+  _, args = split_list(args, [num_consts])
+  py_args = tree_unflatten(in_tree, args)
+  py_out, py_res = yield py_args, kwargs
+  out, out_tree_ = tree_flatten(py_out)
+  res, res_tree = tree_flatten(py_res)
+  assert out_tree_ == out_tree, "todo error"
+  out_avals_ = [core.raise_to_shaped(core.get_aval(x)) for x in out]
+  assert all(map(core.typematch, out_avals_, out_avals)), "todo error"
+  yield (*res, *out), res_tree
+
+
+@lu.transformation
+def flatten_vjp_bwd(num_consts, in_tree, out_tree, kwargs, res_tree_thunk,
+                    *args):
+  res_tree = res_tree_thunk()
+  assert len(args) == res_tree.num_leaves + out_tree.num_leaves
+  res, cts_out = split_list(args, [res_tree.num_leaves])
+  py_res = tree_unflatten(res_tree, res)
+  py_cts_out = tree_unflatten(out_tree, cts_out)
+  py_cts_in = yield (py_res, py_cts_out), kwargs
+  cts_in, in_tree_ = tree_flatten(py_cts_in, is_leaf=lambda x: x is None)
+  assert in_tree_ == in_tree, "todo error"
+  # TODO(dfm): Check types of cts_in match avals_in
+  yield cts_in
+
+
 def custom_primitive_jvp(name: str, primals, tangents,
-                         call_jaxpr: core.ClosedJaxpr, jvp: Rule | None, **_):
+                         call_jaxpr: core.ClosedJaxpr, jvp: Rule | None,
+                         vjp_fwd: Rule | None, vjp_bwd: Rule | None, res_tree,
+                         **_):
   del call_jaxpr
+
+  if vjp_fwd is not None:
+    assert vjp_bwd is not None
+    fwd_in = [core.full_lower(x) for x in primals]
+    res_and_primal = vjp_fwd.call_wrapped(*fwd_in)
+    num_res = res_tree().num_leaves
+    res, primals_out = split_list(res_and_primal, [num_res])
+    avals_out = [core.raise_to_shaped(core.get_aval(x)) for x in primals_out]
+    tangents_in = map(ad.instantiate_zeros, tangents)
+    tangents_out = ad.custom_lin_p.bind(
+        *res, *tangents_in, num_res=num_res, bwd=vjp_bwd.call_wrapped,
+        out_avals=avals_out, symbolic_zeros=False)
+    tangents_out = map(tie_p.bind, primals_out, tangents_out)
+    tangents_out = map(ad.recast_to_float0, primals_out, tangents_out)
+    return primals_out, tangents_out
+
   if jvp is None:
     raise NotImplementedError(
         f"'jvp' not implemented for custom primitive '{name}'")
@@ -170,8 +233,9 @@ def flatten_transpose(num_consts, in_tree, out_tree, kwargs, cts_in, *args):
 
 def custom_primitive_transpose(name: str, cts_in, *args,
                                call_jaxpr: core.ClosedJaxpr, jvp: Rule | None,
-                               transpose: Rule | None, **_):
-  del call_jaxpr, jvp
+                               vjp_fwd: Rule | None, vjp_bwd: Rule | None,
+                               res_tree, transpose: Rule | None, **_):
+  del call_jaxpr, jvp, vjp_fwd, vjp_bwd
   if transpose is None:
     raise NotImplementedError(
         f"'transpose' not implemented for custom primitive '{name}'")
@@ -197,10 +261,11 @@ def flatten_vmap(num_consts, in_tree, out_tree, kwargs, args, dims):
   yield out, [0 if b else not_mapped for b in batched]
 
 
-def custom_primitive_batching(name: str, args, dims, *,
-                              call_jaxpr: core.ClosedJaxpr, jvp: Rule | None,
-                              transpose: Rule | None, vmap: Rule | None, **_):
-  del call_jaxpr, jvp, transpose
+def custom_primitive_vmap(name: str, args, dims, call_jaxpr: core.ClosedJaxpr,
+                          jvp: Rule | None, vjp_fwd: Rule | None,
+                          vjp_bwd: Rule | None, res_tree, transpose: Rule | None,
+                          vmap: Rule | None, **_):
+  del call_jaxpr, jvp, vjp_fwd, vjp_bwd, transpose
   if vmap is None:
     raise NotImplementedError(
         f"'vmap' not implemented for custom primitive '{name}'")
