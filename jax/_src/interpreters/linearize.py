@@ -62,7 +62,7 @@ def linearize(fun: lu.WrappedFun) -> lu.WrappedFun:
 @lu.transformation
 def linearize_outer(primals, linears):
   parent_trace = core.find_cur_trace()
-  tag = LinarizeTag()
+  tag = LinearizeTag()
   with source_info_util.transform_name_stack("linearize"):
     out_primals, out_linears = yield (parent_trace, tag, primals, linears), {}
   yield out_primals, out_linears
@@ -80,7 +80,7 @@ def linearize_inner(parent_trace, tag, primals, linears):
   yield unzip2(map(trace.to_primal_linear_pair, ans))
 
 
-class LinarizeTag:
+class LinearizeTag:
   pass
 
 
