@@ -137,6 +137,11 @@ class LinearizeTracer(core.Tracer):
 
 primitive_linearize_rules: dict[core.Primitive, Callable] = {}
 
+def linearize_exp(x):
+  val = lax.exp(x)
+  return val, lambda t: val * t
+primitive_linearize_rules[lax.exp_p] = linearize_exp
+
 def linearize_sin(x):
   return lax.sin(x), lambda t: lax.cos(x) * t
 primitive_linearize_rules[lax.sin_p] = linearize_sin
@@ -152,7 +157,7 @@ if __name__ == "__main__":
   import jax.numpy as jnp
 
   def fun(x):
-    return lax.add(lax.sin(x), x)
+    return lax.exp(lax.add(lax.sin(x), x))
 
   y, lin = api_linearize(fun, jnp.array(1.0))
   print(y)
