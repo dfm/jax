@@ -492,10 +492,12 @@ class custom_vjp(Generic[ReturnValue]):
 
   def __init__(self,
                fun: Callable[..., ReturnValue],
-               nondiff_argnums: tuple[int, ...] = ()):
+               nondiff_argnums: tuple[int, ...] = (),
+               allow_jvp: bool = False):
     update_wrapper(self, fun)
     self.fun = fun
     self.nondiff_argnums = nondiff_argnums
+    self.allow_jvp = allow_jvp
     self.fwd: Callable[..., tuple[ReturnValue, Any]] | None = None
     self.bwd: Callable[..., tuple[Any, ...]] | None = None
     self.symbolic_zeros = False
@@ -620,7 +622,8 @@ class custom_vjp(Generic[ReturnValue]):
       flat_bwd = _flatten_bwd(bwd, in_tree, in_avals, out_trees).call_wrapped
       out_flat = custom_vjp_call_p.bind(flat_fun, flat_fwd, flat_bwd,
                                         *args_flat, out_trees=out_trees,
-                                        symbolic_zeros=self.symbolic_zeros)
+                                        symbolic_zeros=self.symbolic_zeros,
+                                        allow_jvp=self.allow_jvp)
       _, (out_tree, _) = lu.merge_linear_aux(out_type, out_trees)
       return tree_unflatten(out_tree, out_flat)
 
@@ -800,7 +803,7 @@ def _temporary_shape_exception(a, a_) -> bool:
 class CustomVJPCallPrimitive(core.CallPrimitive):
   initial_style: core.Primitive
 
-  def bind(self, fun, fwd, bwd, *args, out_trees, symbolic_zeros):
+  def bind(self, fun, fwd, bwd, *args, out_trees, symbolic_zeros, allow_jvp):
     args = map(core.full_lower, args)
     top_trace = core.find_top_trace(args)
     fun, env_trace_todo1 = process_env_traces(
@@ -811,7 +814,8 @@ class CustomVJPCallPrimitive(core.CallPrimitive):
     bwd_ = lambda *args: bwd(*args)
     outs = top_trace.process_custom_vjp_call(self, fun, fwd, bwd_, tracers,
                                              out_trees=out_trees,
-                                             symbolic_zeros=symbolic_zeros)
+                                             symbolic_zeros=symbolic_zeros,
+                                             allow_jvp=allow_jvp)
     fst, env_trace_todo = lu.merge_linear_aux(env_trace_todo1, env_trace_todo2)
     if fst:
       return core.apply_todos(env_trace_todo, map(core.full_lower, outs))

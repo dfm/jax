@@ -388,26 +388,46 @@ class JVPTrace(Trace):
     raise CustomJVPException()
 
   def process_custom_vjp_call(self, _, __, fwd, bwd, tracers, out_trees,
-                              symbolic_zeros):
+                              symbolic_zeros, allow_jvp):
     primals_in, tangents_in = unzip2((t.primal, t.tangent) for t in tracers)
-    fwd_in = [(core.full_lower(p), type(t) is not Zero)
+    fwd_in = [(core.full_lower(p), t)
               for p, t in zip(primals_in, tangents_in)]
     fwd_in = [x for pair in fwd_in for x in pair]   # flatten
-    res_and_primals_out = fwd.call_wrapped(*fwd_in)
+    if allow_jvp:
+      res_and_primals_out, out_tangents_pvals, jvp_jaxpr, consts = \
+          linearize(_interleave_trues(fwd), *primals_in)
+      del out_tangents_pvals  # unused
+    else:
+      res_and_primals_out = fwd.call_wrapped(*fwd_in)
+      jvp_jaxpr = None
+      consts = ()
     _, res_tree = out_trees()
     res, primals_out = split_list(res_and_primals_out, [res_tree.num_leaves])
     avals_out = [raise_to_shaped(core.get_aval(x)) for x in primals_out]
     # TODO(frostig,mattjj): avoid instantiating zeros when we don't have to!
     tangents_in = map(instantiate_zeros, tangents_in)
     tangents_out = custom_lin_p.bind(
-        *res, *tangents_in, num_res=res_tree.num_leaves, bwd=bwd,
-        out_avals=avals_out, symbolic_zeros=symbolic_zeros)
+        *consts, *res, *tangents_in, num_consts=len(consts),
+        num_res=res_tree.num_leaves, bwd=bwd, out_avals=avals_out,
+        symbolic_zeros=symbolic_zeros, jvp_jaxpr=jvp_jaxpr)
     tangents_out = map(jax._src.lax.lax.tie_p.bind, primals_out, tangents_out)
     tangents_out = map(recast_to_float0, primals_out, tangents_out)
     return map(partial(JVPTracer, self), primals_out, tangents_out)
 
   def post_process_custom_vjp_call(self, out_tracers, _):
     raise CustomVJPException()
+
+  def post_process_custom_vjp_call_fwd(self, out_tracers, out_trees):
+    primals, tangents = unzip2((t.primal, t.tangent) for t in out_tracers)
+    main = self.main
+    _, res_tree = out_trees()
+    _, tangents = split_list(tangents, [res_tree.num_leaves])
+    def todo(vals):
+      trace = main.with_cur_sublevel()
+      return map(partial(JVPTracer, trace), vals, tangents)
+    def bwd_transform(bwd):
+      return bwd
+    return primals, todo, bwd_transform
 
   def process_custom_transpose(self, prim, call, tracers, **params):
     ps_in, ts_in = unzip2((t.primal, t.tangent) for t in tracers)
@@ -452,6 +472,9 @@ class JVPTrace(Trace):
     else:
       raise TypeError((xt, yt))
 
+@lu.transformation
+def _interleave_trues(*args):
+  yield (yield [v for x in args for v in [x, True]], {})
 
 class JVPTracer(Tracer):
   __slots__ = ['primal', 'tangent']
@@ -735,18 +758,28 @@ custom_lin_p.multiple_results = True
 def raise_custom_vjp_error_on_jvp(*_, **__):
   raise TypeError("can't apply forward-mode autodiff (jvp) to a custom_vjp "
                   "function.")
-custom_lin_p.def_impl(raise_custom_vjp_error_on_jvp)
 
-def _custom_lin_transpose(cts_out, *invals, num_res, bwd, out_avals,
-                          symbolic_zeros):
-  res, _ = split_list(invals, [num_res])
+def _custom_lin_impl(*args, num_consts, num_res, bwd, out_avals,
+                     symbolic_zeros, jvp_jaxpr):
+  del bwd, out_avals, symbolic_zeros  # unused
+  if jvp_jaxpr is None:
+    raise TypeError("can't apply forward-mode autodiff (jvp) to a custom_vjp "
+                    "function unless `allow_jvp` is set to `True`.")
+  _, tangents = split_list(args, [num_consts + num_res])
+  return core.jaxpr_as_fun(jvp_jaxpr)(*tangents)
+custom_lin_p.def_impl(_custom_lin_impl)
+
+def _custom_lin_transpose(cts_out, *invals, num_consts, num_res, bwd, out_avals,
+                          symbolic_zeros, jvp_jaxpr):
+  del out_avals, jvp_jaxpr  # unused
+  _, res, _ = split_list(invals, [num_consts, num_res])
   if symbolic_zeros:
     cts_out = map(replace_internal_symbolic_zeros, cts_out)
   else:
     cts_out = map(instantiate_zeros, cts_out)
   cts_in = bwd(*res, *cts_out)
   cts_in = map(replace_rule_output_symbolic_zeros, cts_in)
-  return [None] * num_res + list(cts_in)
+  return [None] * (num_consts + num_res) + list(cts_in)
 primitive_transposes[custom_lin_p] = _custom_lin_transpose
 
 
