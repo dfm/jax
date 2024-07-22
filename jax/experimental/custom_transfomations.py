@@ -49,8 +49,8 @@ class custom_transformations(Generic[T]):
   fun: Callable[..., T]
   nondiff_argnums: set[int]
   jvp: Callable[..., tuple[T, T]] | None = None
-  vjp_fwd: Callable[..., tuple[T, Any]] | None = None
-  vjp_bwd: Callable[..., tuple[Any, ...]] | None = None
+  fwd: Callable[..., tuple[T, Any]] | None = None
+  bwd: Callable[..., tuple[Any, ...]] | None = None
   lin: Callable[..., T] | None = None
   # vmap: Callable[..., tuple[T, bool | Sequence[bool]]]
 
@@ -68,11 +68,11 @@ class custom_transformations(Generic[T]):
   def def_jvp(self, jvp: Callable[..., tuple[T, T]]) -> None:
     self.jvp = jvp
 
-  def def_vjp(
-    self, fwd: Callable[..., tuple[T, Any]], bwd: Callable[..., tuple[Any, ...]]
-  ) -> None:
-    self.vjp_fwd = fwd
-    self.vjp_bwd = bwd
+  def def_fwd(self, fwd: Callable[..., tuple[T, Any]]) -> None:
+    self.fwd = fwd
+
+  def def_bwd(self, bwd: Callable[..., tuple[Any, ...]]) -> None:
+    self.bwd = bwd
 
   def def_lin(self, lin: Callable[..., T]) -> None:
     self.lin = lin
@@ -83,10 +83,8 @@ class custom_transformations(Generic[T]):
   @traceback_util.api_boundary
   def __call__(self, *args: Any, **kwargs: Any) -> T:
     assert not (self.nondiff_argnums), "todo"
-
     name = getattr(self.fun, "__name__", str(self.fun))
 
-    # trace the function to a jaxpr
     args = _resolve_kwargs(self.fun, args, kwargs)
     args_flat, tree_in = tree_flatten(args)
     fun_flat, tree_out_thunk = api_util.flatten_fun_nokwargs(
@@ -97,28 +95,42 @@ class custom_transformations(Generic[T]):
       self.fun, tree_in, tree_out_thunk, False, "custom_transformations"
     )
     jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(fun_flat, avals_in, debug)
-    fun_jaxpr = core.ClosedJaxpr(pe.convert_constvars_jaxpr(jaxpr), ())
+    prim_jaxpr = core.ClosedJaxpr(pe.convert_constvars_jaxpr(jaxpr), ())
     tree_out = tree_out_thunk()
 
-    jvp = self.jvp
-    if jvp:
+    if self.jvp:
+      jvp = self.jvp
       rule_name = getattr(jvp, "__name__", str(jvp))
       jvp = _flatten_jvp(
-        lu.wrap_init(jvp), name, rule_name, tree_in, tree_out, fun_jaxpr.out_avals
+        lu.wrap_init(jvp), name, rule_name, tree_in, tree_out, prim_jaxpr.out_avals
       )
+    else:
+      @lu.wrap_init
+      def jvp(*args):
+        _, tangents = split_list(args, [len(args) // 2])
+        nz = [False] * len(consts) + [not isinstance(t, ad_util.Zero)
+                                      for t in tangents]
+        del tangents
+        jvp_jaxpr, out_nz = ad.jvp_jaxpr(prim_jaxpr, nz, False)
+        return core.jaxpr_as_fun(jvp_jaxpr)(*consts, *args)
 
-    vjp_fwd = self.vjp_fwd
-    if vjp_fwd:
-      vjp_bwd = self.vjp_bwd
-      if not vjp_bwd:
-        raise ValueError("TODO")
-      fwd_name = getattr(vjp_fwd, "__name__", str(vjp_fwd))
-      vjp_fwd, tree_res_thunk = _flatten_vjp_fwd(
-        lu.wrap_init(vjp_fwd), name, fwd_name, tree_in, tree_out
+    fwd = self.fwd
+    if fwd:
+      fwd_name = getattr(fwd, "__name__", str(fwd))
+      fwd, tree_res_thunk = _flatten_fwd(
+        lu.wrap_init(fwd), name, fwd_name, tree_in, tree_out
       )
-      bwd_name = getattr(vjp_bwd, "__name__", str(vjp_bwd))
-      vjp_bwd = _flatten_vjp_bwd(
-        lu.wrap_init(vjp_bwd),
+    else:
+      assert not self.bwd, "TODO"
+      assert not self.lin, "TODO"
+      tree_res_thunk = None
+
+    bwd = self.bwd
+    if bwd:
+      assert tree_res_thunk is not None
+      bwd_name = getattr(bwd, "__name__", str(bwd))
+      bwd = _flatten_bwd(
+        lu.wrap_init(bwd),
         name,
         bwd_name,
         avals_in,
@@ -126,23 +138,47 @@ class custom_transformations(Generic[T]):
         tree_out,
         tree_res_thunk,
       )
-
     lin = self.lin
     if lin:
+      assert tree_res_thunk is not None
       rule_name = getattr(lin, "__name__", str(lin))
       lin = _flatten_lin(
         lu.wrap_init(lin), name, rule_name, tree_in, tree_out, tree_res_thunk
       )
+
+    if not bwd:
+      assert lin is not None
+      assert tree_res_thunk is not None
+
+      @lu.wrap_init
+      def bwd(*args):
+        tree_res = tree_res_thunk()
+        res, cts_out = split_list(args, [tree_res.num_leaves])
+
+        avals_in = [core.raise_to_shaped(core.get_aval(x)) for x in res]
+        avals_in = avals_in + prim_jaxpr.in_avals[len(consts):]
+        debug = pe.debug_info(
+          lin, tree_in, tree_out_thunk, False, "custom_transformations.bwd"
+        )
+        lin_jaxpr, _, lin_consts, () = pe.trace_to_jaxpr_dynamic(lin, avals_in, debug)
+        # TODO(dfm): Do DCE here like in linear_transpose?
+
+        dummies = res + [ad.UndefinedPrimal(x) for x in prim_jaxpr.in_avals[len(consts):]]
+        cts_in = ad.backward_pass(lin_jaxpr, True, lin_consts, dummies, cts_out)
+        cts_res, cts_in = split_list(cts_in, [len(res)])
+        assert all(isinstance(ct, ad_util.Zero) for ct in cts_res)
+        cts_in = map(ad.instantiate_zeros, cts_in)
+        return cts_in
 
     out_flat = custom_transformations_p.bind(
       *consts,
       *args_flat,
       num_consts=len(consts),
       name=name,
-      prim_jaxpr=fun_jaxpr,
+      prim_jaxpr=prim_jaxpr,
       jvp=jvp,
-      fwd=vjp_fwd,
-      bwd=vjp_bwd,
+      fwd=fwd,
+      bwd=bwd,
       lin=lin,
     )
     return tree_unflatten(tree_out, out_flat)
@@ -199,7 +235,7 @@ def _flatten_jvp(name, rule_name, tree_in, tree_out, avals_out, *args):
 
 
 @lu.transformation_with_aux
-def _flatten_vjp_fwd(name, rule_name, tree_in, tree_out, *args):
+def _flatten_fwd(name, rule_name, tree_in, tree_out, *args):
   py_args = tree_unflatten(tree_in, args)
   pair_out = yield py_args, {}
   if not isinstance(pair_out, (list, tuple)) or len(pair_out) != 2:
@@ -222,7 +258,7 @@ def _flatten_vjp_fwd(name, rule_name, tree_in, tree_out, *args):
 
 
 @lu.transformation
-def _flatten_vjp_bwd(
+def _flatten_bwd(
   name, rule_name, avals_in, tree_in, tree_out, tree_res_thunk, *args
 ):
   tree_res = tree_res_thunk()
