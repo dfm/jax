@@ -105,6 +105,7 @@ class custom_transformations(Generic[T]):
         lu.wrap_init(jvp), name, rule_name, tree_in, tree_out, prim_jaxpr.out_avals
       )
     else:
+      # Default to JVP of primal (ok because we already traced it)
       @lu.wrap_init
       def jvp(*args):
         _, tangents = split_list(args, [len(args) // 2])
@@ -146,29 +147,17 @@ class custom_transformations(Generic[T]):
         lu.wrap_init(lin), name, rule_name, tree_in, tree_out, tree_res_thunk
       )
 
-    if not bwd:
-      assert lin is not None
+    if lin and not bwd:
+      # Default to transposing lin
       assert tree_res_thunk is not None
+      lin_in_avals = prim_jaxpr.in_avals[len(consts):]
+      bwd = _transpose_lin_or_bwd(lin, tree_res_thunk, lin_in_avals)
 
-      @lu.wrap_init
-      def bwd(*args):
-        tree_res = tree_res_thunk()
-        res, cts_out = split_list(args, [tree_res.num_leaves])
-
-        avals_in = [core.raise_to_shaped(core.get_aval(x)) for x in res]
-        avals_in = avals_in + prim_jaxpr.in_avals[len(consts):]
-        debug = pe.debug_info(
-          lin, tree_in, tree_out_thunk, False, "custom_transformations.bwd"
-        )
-        lin_jaxpr, _, lin_consts, () = pe.trace_to_jaxpr_dynamic(lin, avals_in, debug)
-        # TODO(dfm): Do DCE here like in linear_transpose?
-
-        dummies = res + [ad.UndefinedPrimal(x) for x in prim_jaxpr.in_avals[len(consts):]]
-        cts_in = ad.backward_pass(lin_jaxpr, True, lin_consts, dummies, cts_out)
-        cts_res, cts_in = split_list(cts_in, [len(res)])
-        assert all(isinstance(ct, ad_util.Zero) for ct in cts_res)
-        cts_in = map(ad.instantiate_zeros, cts_in)
-        return cts_in
+    if bwd and not lin:
+      # Default to transposing lin
+      assert tree_res_thunk is not None
+      bwd_in_avals = prim_jaxpr.out_avals
+      lin = _transpose_lin_or_bwd(bwd, tree_res_thunk, bwd_in_avals)
 
     out_flat = custom_transformations_p.bind(
       *consts,
@@ -353,6 +342,26 @@ def _flatten_lin(name, rule_name, tree_in, tree_out, tree_res_thunk, *args):
   yield tangents_out
 
 
+def _transpose_lin_or_bwd(fun: lu.WrappedFun, tree_res_thunk, in_avals):
+  @lu.wrap_init
+  def transposed_fun(*args):
+    tree_res = tree_res_thunk()
+    res, cts_out = split_list(args, [tree_res.num_leaves])
+
+    in_avals_ = [core.raise_to_shaped(core.get_aval(x)) for x in res] + in_avals
+    jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(fun, in_avals_)
+    # TODO(dfm): Do DCE here like in linear_transpose?
+
+    dummies = res + [ad.UndefinedPrimal(x) for x in in_avals]
+    print(dummies)
+    cts_in = ad.backward_pass(jaxpr, True, consts, dummies, cts_out)
+    cts_res, cts_in = split_list(cts_in, [len(res)])
+    assert all(isinstance(ct, ad_util.Zero) for ct in cts_res)
+    cts_in = map(ad.instantiate_zeros, cts_in)
+    return cts_in
+  return transposed_fun
+
+
 def _custom_transformations_impl(*args, prim_jaxpr: core.ClosedJaxpr, **_):
   return core.jaxpr_as_fun(prim_jaxpr)(*args)
 
@@ -532,21 +541,11 @@ def _transpose_helper_impl(
   lin: lu.WrappedFun | None,
 ):
   del name, prim_jaxpr, fwd, bwd
-  if lin is None:
-    # If a custom lin rule isn't provided, use the JVP rule. This is inefficient,
-    # but it's the best we can do by default.
-    _, args = split_list(args, [num_res + num_consts])
-    primals, tangents = split_list(args, [len(args) // 2])
-    primals_and_tangents_out = jvp.call_wrapped(*primals, *tangents)
-    _, tangents_out = split_list(
-      primals_and_tangents_out, [len(primals_and_tangents_out) // 2]
-    )
-    return tangents_out
-  else:
-    res, _, args = split_list(args, [num_res, num_consts])
-    _, tangents_in = split_list(args, [len(args) // 2])
-    tangents_out = lin.call_wrapped(*res, *tangents_in)
-    return tangents_out
+  assert lin is not None
+  res, _, args = split_list(args, [num_res, num_consts])
+  _, tangents_in = split_list(args, [len(args) // 2])
+  tangents_out = lin.call_wrapped(*res, *tangents_in)
+  return tangents_out
 
 
 def _transpose_helper_abstract_eval(*_, prim_jaxpr: core.ClosedJaxpr, **__):
