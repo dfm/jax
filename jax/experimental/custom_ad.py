@@ -45,14 +45,13 @@ zip = safe_zip
 T = TypeVar("T")
 
 
-class custom_transformations(Generic[T]):
+class custom_ad(Generic[T]):
   fun: Callable[..., T]
   nondiff_argnums: set[int]
   jvp: Callable[..., tuple[T, T]] | None = None
   fwd: Callable[..., tuple[T, Any]] | None = None
   bwd: Callable[..., tuple[Any, ...]] | None = None
   lin: Callable[..., T] | None = None
-  # vmap: Callable[..., tuple[T, bool | Sequence[bool]]]
 
   def __init__(
     self,
@@ -67,18 +66,19 @@ class custom_transformations(Generic[T]):
 
   def def_jvp(self, jvp: Callable[..., tuple[T, T]]) -> None:
     self.jvp = jvp
+    return jvp
 
   def def_fwd(self, fwd: Callable[..., tuple[T, Any]]) -> None:
     self.fwd = fwd
+    return fwd
 
   def def_bwd(self, bwd: Callable[..., tuple[Any, ...]]) -> None:
     self.bwd = bwd
+    return bwd
 
   def def_lin(self, lin: Callable[..., T]) -> None:
     self.lin = lin
-
-  # def def_vmap(self, vmap: Callable[..., tuple[T, bool | Sequence[bool]]]) -> None:
-  #   self.vmap = vmap
+    return lin
 
   @traceback_util.api_boundary
   def __call__(self, *args: Any, **kwargs: Any) -> T:
@@ -109,10 +109,9 @@ class custom_transformations(Generic[T]):
       @lu.wrap_init
       def jvp(*args):
         _, tangents = split_list(args, [len(args) // 2])
-        nz = [False] * len(consts) + [not isinstance(t, ad_util.Zero)
-                                      for t in tangents]
+        nz = [False] * len(consts) + [not isinstance(t, ad_util.Zero) for t in tangents]
         del tangents
-        jvp_jaxpr, out_nz = ad.jvp_jaxpr(prim_jaxpr, nz, False)
+        jvp_jaxpr, _ = ad.jvp_jaxpr(prim_jaxpr, nz, False)
         return core.jaxpr_as_fun(jvp_jaxpr)(*consts, *args)
 
     fwd = self.fwd
@@ -150,10 +149,11 @@ class custom_transformations(Generic[T]):
     if lin and not bwd:
       # Default to transposing lin
       assert tree_res_thunk is not None
-      lin_in_avals = prim_jaxpr.in_avals[len(consts):]
+      lin_in_avals = prim_jaxpr.in_avals[len(consts) :]
       bwd = _transpose_lin_or_bwd(lin, tree_res_thunk, lin_in_avals)
 
     if bwd and not lin:
+      assert False, "TODO"
       # Default to transposing lin
       assert tree_res_thunk is not None
       bwd_in_avals = prim_jaxpr.out_avals
@@ -247,9 +247,7 @@ def _flatten_fwd(name, rule_name, tree_in, tree_out, *args):
 
 
 @lu.transformation
-def _flatten_bwd(
-  name, rule_name, avals_in, tree_in, tree_out, tree_res_thunk, *args
-):
+def _flatten_bwd(name, rule_name, avals_in, tree_in, tree_out, tree_res_thunk, *args):
   tree_res = tree_res_thunk()
   assert len(args) == tree_res.num_leaves + tree_out.num_leaves
   res, cts_out = split_list(args, [tree_res.num_leaves])
@@ -359,6 +357,7 @@ def _transpose_lin_or_bwd(fun: lu.WrappedFun, tree_res_thunk, in_avals):
     assert all(isinstance(ct, ad_util.Zero) for ct in cts_res)
     cts_in = map(ad.instantiate_zeros, cts_in)
     return cts_in
+
   return transposed_fun
 
 
@@ -438,6 +437,7 @@ def _jvp_helper_partial_eval(
   bwd: lu.WrappedFun | None,
   lin: lu.WrappedFun | None,
 ):
+  print("pe", trace)
   consts, tracers = split_list(tracers, [num_consts])
   assert all(t.pval.is_known() for t in consts)
   primals, tangents = split_list(tracers, [len(tracers) // 2])
@@ -483,6 +483,40 @@ def _jvp_helper_partial_eval(
   return primals_out + tangents_out
 
 
+def _jvp_helper_staging(
+  trace,
+  *tracers,
+  num_consts: int,
+  name: str,
+  prim_jaxpr: core.ClosedJaxpr,
+  jvp: lu.WrappedFun | None,
+  fwd: lu.WrappedFun | None,
+  bwd: lu.WrappedFun | None,
+  lin: lu.WrappedFun | None,
+):
+  print("staging")
+  source_info = source_info_util.current()
+  out_tracers = [
+    pe.DynamicJaxprTracer(trace, out_aval, source_info)
+    for out_aval in (*prim_jaxpr.out_avals, *prim_jaxpr.out_avals)
+  ]
+  params = dict(
+    num_consts=num_consts,
+    name=name,
+    prim_jaxpr=prim_jaxpr,
+    jvp=jvp,
+    fwd=fwd,
+    bwd=bwd,
+    lin=lin,
+  )
+  eqn = pe.new_jaxpr_eqn(
+    [trace.getvar(x) for x in tracers], [trace.makevar(x) for x in out_tracers],
+    jvp_helper_p, params, prim_jaxpr.effects, source_info
+  )
+  trace.frame.add_eqn(eqn)
+  return out_tracers
+
+
 def _jvp_helper_dce(used_outputs: list[bool], eqn: core.JaxprEqn):
   primals_out_used, tangents_out_used = split_list(
     used_outputs, [len(used_outputs) // 2]
@@ -526,6 +560,7 @@ mlir.register_lowering(
   mlir.lower_fun(_jvp_helper_impl, multiple_results=True),
 )
 pe.custom_partial_eval_rules[jvp_helper_p] = _jvp_helper_partial_eval
+pe.custom_staging_rules[jvp_helper_p] = _jvp_helper_staging
 pe.dce_rules[jvp_helper_p] = _jvp_helper_dce
 
 
