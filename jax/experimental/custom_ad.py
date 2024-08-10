@@ -27,17 +27,12 @@ from jax._src import custom_api_util
 from jax._src import linear_util as lu
 from jax._src import source_info_util
 from jax._src import traceback_util
+from jax._src import custom_derivatives as cd
 from jax._src.interpreters import ad
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
-from jax._src.tree_util import (
-  tree_flatten,
-  tree_unflatten,
-  treedef_children,
-  tree_map,
-  tree_flatten_with_path,
-  keystr,
-)
+from jax._src.tree_util import (tree_flatten, tree_unflatten, treedef_children,
+                                tree_map, tree_flatten_with_path)
 from jax._src.util import safe_map, safe_zip, split_list, unzip2
 
 map = safe_map
@@ -48,20 +43,20 @@ T = TypeVar("T")
 
 class custom_ad(Generic[T]):
   fun: Callable[..., T]
-  nondiff_argnums: set[int]
+  nondiff_argnums: Sequence[int]
   jvp: Callable[..., tuple[T, T]] | None = None
   fwd: Callable[..., tuple[T, Any]] | None = None
   bwd: Callable[..., tuple[Any, ...]] | None = None
   lin: Callable[..., T] | None = None
 
   def __init__(
-    self,
-    fun: Callable[..., T],
-    nondiff_argnums: Sequence[int] = (),
+      self,
+      fun: Callable[..., T],
+      nondiff_argnums: Sequence[int] = (),
   ):
     update_wrapper(self, fun)
     self.fun = fun
-    self.nondiff_argnums = set(nondiff_argnums)
+    self.nondiff_argnums = nondiff_argnums
 
   __getattr__ = custom_api_util.forward_attr
 
@@ -83,18 +78,30 @@ class custom_ad(Generic[T]):
 
   @traceback_util.api_boundary
   def __call__(self, *args: Any, **kwargs: Any) -> T:
-    assert not (self.nondiff_argnums), "todo"
     name = getattr(self.fun, "__name__", str(self.fun))
-
     args = _resolve_kwargs(self.fun, args, kwargs)
+
+    if self.nondiff_argnums:
+      for i in self.nondiff_argnums: cd._check_for_tracers(args[i])
+      nondiff_argnums = set(self.nondiff_argnums)
+      dyn_argnums = [i for i in range(len(args)) if i not in nondiff_argnums]
+      fun, dyn_args = api_util.argnums_partial(
+          lu.wrap_init(self.fun), dyn_argnums, args,
+          require_static_args_hashable=False)
+      # Note: Here we sort nondiff_argnums, but in custom_jvp and custom_vjp we
+      # don't.
+      static_args = [args[i] for i in sorted(self.nondiff_argnums)]
+    else:
+      fun, dyn_args = lu.wrap_init(self.fun), args
+      static_args = []
+
+    # Since this is an "initial style" primitive, we trace the primal function
+    # to a jaxpr right off the bat. This should be updated eventually, but for
+    # now it significantly simplifies the implementation.
     args_flat, tree_in = tree_flatten(args)
-    fun_flat, tree_out_thunk = api_util.flatten_fun_nokwargs(
-      lu.wrap_init(self.fun), tree_in
-    )
+    fun_flat, tree_out_thunk = api_util.flatten_fun_nokwargs(fun, tree_in)
     avals_in = [core.raise_to_shaped(core.get_aval(x)) for x in args_flat]
-    debug = pe.debug_info(
-      self.fun, tree_in, tree_out_thunk, False, "custom_ad"
-    )
+    debug = pe.debug_info(fun, tree_in, tree_out_thunk, False, "custom_ad")
     jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(fun_flat, avals_in, debug)
     prim_jaxpr = core.ClosedJaxpr(pe.convert_constvars_jaxpr(jaxpr), ())
     tree_out = tree_out_thunk()
@@ -103,14 +110,15 @@ class custom_ad(Generic[T]):
       jvp = self.jvp
       rule_name = getattr(jvp, "__name__", str(jvp))
       jvp = _flatten_jvp(
-        lu.wrap_init(jvp), name, rule_name, tree_in, tree_out, prim_jaxpr.out_avals
-      )
+          lu.wrap_init(jvp), name, rule_name, tree_in, tree_out,
+          prim_jaxpr.out_avals)
     else:
       # Default to JVP of primal (ok because we already traced it)
       @lu.wrap_init
       def jvp(*args):
         _, tangents = split_list(args, [len(args) // 2])
-        nz = [False] * len(consts) + [not isinstance(t, ad_util.Zero) for t in tangents]
+        nz = [False] * len(consts)
+        nz += [not isinstance(t, ad_util.Zero) for t in tangents]
         del tangents
         jvp_jaxpr, _ = ad.jvp_jaxpr(prim_jaxpr, nz, False)
         return core.jaxpr_as_fun(jvp_jaxpr)(*consts, *args)
@@ -119,58 +127,79 @@ class custom_ad(Generic[T]):
     if fwd:
       fwd_name = getattr(fwd, "__name__", str(fwd))
       fwd, tree_res_thunk = _flatten_fwd(
-        lu.wrap_init(fwd), name, fwd_name, tree_in, tree_out
-      )
+          lu.wrap_init(fwd), name, fwd_name, tree_in, tree_out)
     else:
-      assert not self.bwd, "TODO"
-      assert not self.lin, "TODO"
       tree_res_thunk = None
 
     bwd = self.bwd
     if bwd:
-      assert tree_res_thunk is not None
+      if fwd is None:
+        raise AttributeError(
+            f"No `fwd` rule defined for the custom_ad function {name}. When a "
+            "`bwd` rule is defined, a `fwd` rule must also be set using "
+            "`def_fwd`.")
       bwd_name = getattr(bwd, "__name__", str(bwd))
-      bwd = _flatten_bwd(
-        lu.wrap_init(bwd),
-        name,
-        bwd_name,
-        avals_in,
-        tree_in,
-        tree_out,
-        tree_res_thunk,
-      )
+      bwd = _flatten_bwd(lu.wrap_init(bwd), name, bwd_name, avals_in, tree_in,
+          tree_out, tree_res_thunk)
+
     lin = self.lin
     if lin:
-      assert tree_res_thunk is not None
+      if fwd is None:
+        raise AttributeError(
+            f"No `fwd` rule defined for the custom_ad function {name}. When a "
+            "`lin` rule is defined, a `fwd` rule must also be set using "
+            "`def_fwd`.")
       rule_name = getattr(lin, "__name__", str(lin))
       lin = _flatten_lin(
-        lu.wrap_init(lin), name, rule_name, tree_in, tree_out, tree_res_thunk
-      )
+          lu.wrap_init(lin), name, rule_name, tree_in, tree_out, tree_res_thunk)
 
-    if lin and not bwd:
-      # Default to transposing lin
-      assert tree_res_thunk is not None
-      lin_in_avals = prim_jaxpr.in_avals[len(consts) :]
-      bwd = _transpose_lin_or_bwd(lin, tree_res_thunk, lin_in_avals)
+    if lin or bwd:
+      if not bwd:
+        # Default to transposing lin
+        lin_in_avals = prim_jaxpr.in_avals[len(consts) :]
+        bwd = _transpose_lin_or_bwd(lin, tree_res_thunk, lin_in_avals)
 
-    if bwd and not lin:
-      assert False, "TODO"
-      # Default to transposing lin
-      assert tree_res_thunk is not None
-      bwd_in_avals = prim_jaxpr.out_avals
-      lin = _transpose_lin_or_bwd(bwd, tree_res_thunk, bwd_in_avals)
+      if not lin:
+        # TODO(dfm): transpose bwd to get a default lin.
+        pass
 
-    out_flat = custom_ad_p.bind(
-      *consts,
-      *args_flat,
-      num_consts=len(consts),
-      name=name,
-      prim_jaxpr=prim_jaxpr,
-      jvp=jvp,
-      fwd=fwd,
-      bwd=bwd,
-      lin=lin,
-    )
+    else:
+      # TODO(dfm): When we have neither lin nor bwd, we should probably default
+      # to using the JVP rule.
+      if fwd:
+        raise ValueError(
+            f"A `fwd` rule was defined for the custom_ad function {name}, but "
+            "since no `lin` or `bwd` rule was defined, the `fwd` will not be "
+            "used.")
+
+    jvp = cd._add_args(jvp, static_args)
+    fwd = cd._add_args(fwd, static_args) if fwd else None
+    bwd = cd._add_args(bwd, static_args) if bwd else None
+    lin = cd._add_args(lin, static_args) if lin else None
+
+    # Because this is an "initial style" primitive, we also want to stage out
+    # all the rules (except for bwd), but we do that lazily to avoid infinite
+    # recursions and to avoid evaluating the rules until we need them.
+    @pe._memoize
+    def jvp_jaxpr_thunk():
+      jvp_in_avals = (*prim_jaxpr.in_avals, *prim_jaxpr.in_avals)
+      jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(jvp, jvp_in_avals)
+      return jaxpr, consts
+
+    @pe._memoize
+    def fwd_jaxpr_thunk():
+      assert fwd is not None
+      jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(fwd, prim_jaxpr.in_avals)
+      return jaxpr, consts
+
+    @pe._memoize
+    def lin_jaxpr_thunk():
+      fwd_jaxpr =  fwd_jaxpr_thunk()
+      jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(fwd, prim_jaxpr.in_avals)
+      return jaxpr, consts
+
+    out_flat = custom_ad_p.bind(*consts, *args_flat, num_consts=len(consts),
+        name=name, prim_jaxpr=prim_jaxpr, jvp=jvp, fwd=fwd, bwd=bwd, lin=lin)
     return tree_unflatten(tree_out, out_flat)
 
 
