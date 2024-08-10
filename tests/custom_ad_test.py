@@ -38,6 +38,190 @@ def count_calls(f):
 
 
 class CustomADTest(jtu.JaxTestCase):
+  def test_jvp_basic(self):
+    @custom_ad
+    def f(x):
+      return jnp.sin(x)
+    @f.def_jvp
+    def _(primals, tangents):
+      x, = primals
+      g, = tangents
+      return f(x), 2 * jnp.cos(x) * g
+
+    x = 3.
+    self.assertAllClose(f(x), jnp.sin(x))
+    self.assertAllClose(jax.jvp(f, (x,), (1.,)),
+                        (jnp.sin(x), 2 * jnp.cos(x)))
+    self.assertAllClose(jax.grad(f)(x), 2 * jnp.cos(x))
+
+  def test_jvp_invariance(self):
+    @custom_ad
+    def f(x):
+      return jnp.cos(2 * x) / 2.
+    @f.def_jvp
+    def _(primals, tangents):
+      x, = primals
+      g, = tangents
+      return (f(x), 3 * g)
+    def f2(x):
+      y, _ = jax.jvp(f, (x,), (x,))
+      return y
+    def f3(x):
+      y, _ = jax.jvp(f2, (x,), (x,))
+      return y
+    x = 1.
+    self.assertAllClose(jax.jvp(f, (x,), (x,)),
+                        jax.jvp(f2, (x,), (x,)),
+                        check_dtypes=False)
+    self.assertAllClose(jax.jvp(f, (x,), (x,)),
+                        jax.jvp(f3, (x,), (x,)),
+                        check_dtypes=False)
+
+  # def test_jvp_vmap(self):
+  #   @jax.custom_jvp
+  #   def f(x):
+  #     assert jnp.ndim(x) == 0
+  #     return jnp.sin(x)
+  #   def f_jvp(primals, tangents):
+  #     x, = primals
+  #     g, = tangents
+  #     assert jnp.ndim(x) == jnp.ndim(g) == 0
+  #     return f(x), 2 * jnp.cos(x) * g
+  #   f.defjvp(f_jvp)
+
+  #   x = jnp.arange(3.)
+  #   xx = jnp.arange(6.).reshape(2, 3)
+
+  #   # vmap of f
+  #   self.assertAllClose(api.vmap(f)(x), jnp.sin(x))
+  #   self.assertAllClose(api.vmap(api.vmap(f))(xx), jnp.sin(xx))
+
+  #   # vmap of jvp of f
+  #   self.assertAllClose(api.vmap(lambda x: api.jvp(f, (x,), (x,)))(x),
+  #                       (jnp.sin(x), 2 * jnp.cos(x) * x))
+  #   self.assertAllClose(api.vmap(api.vmap(lambda x: api.jvp(f, (x,), (x,))))(xx),
+  #                       (jnp.sin(xx), 2 * jnp.cos(xx) * xx))
+
+  #   # jvp of vmap of f
+  #   self.assertAllClose(api.jvp(api.vmap(f), (x,), (x,)),
+  #                       (jnp.sin(x), 2 * jnp.cos(x) * x))
+  #   self.assertAllClose(api.jvp(api.vmap(api.vmap(f)), (xx,), (xx,)),
+  #                       (jnp.sin(xx), 2 * jnp.cos(xx) * xx))
+
+  #   # vmap of jvp of vmap of f
+  #   self.assertAllClose(api.vmap(lambda x: api.jvp(api.vmap(f), (x,), (x,)))(xx),
+  #                       (jnp.sin(xx), 2 * jnp.cos(xx) * xx))
+
+  def test_jvp_jit(self):
+    @custom_ad
+    def f(x):
+      return jnp.sin(x)
+    @f.def_jvp
+    def _(primals, tangents):
+      x, = primals
+      g, = tangents
+      return f(x), 2 * jnp.cos(x) * g
+
+    x = 3.
+    self.assertAllClose(jax.jit(f)(x), jnp.sin(x))
+    self.assertAllClose(jax.jit(jax.jit(f))(x), jnp.sin(x))
+    self.assertAllClose(jax.jit(lambda x: jax.jvp(f, (x,), (x,)))(x),
+                        (jnp.sin(x), 2 * jnp.cos(x) * x),
+                        check_dtypes=False)
+    self.assertAllClose(jax.jvp(jax.jit(f), (x,), (x,)),
+                        (jnp.sin(x), 2 * jnp.cos(x) * x),
+                        check_dtypes=False)
+
+  def test_jvp_pytrees(self):
+    @custom_ad
+    def f(x):
+      return {'b': jnp.sin(x['a'])}
+    @f.def_jvp
+    def _(primals, tangents):
+      x, = primals
+      g, = tangents
+      return f(x), {'b': 2 * jnp.cos(x['a']) * g['a']}
+    x = {'a': 3.}
+    self.assertAllClose(f(x)['b'], jnp.sin(x['a']))
+    self.assertAllClose(jax.jvp(f, (x,), (x,)),
+                        ({'b': jnp.sin(x['a'])},
+                         {'b': 2 * jnp.cos(x['a']) * x['a']}),
+                        check_dtypes=False)
+
+  def test_jvp_kwargs(self):
+    @custom_ad
+    def my_fun(x, y, c=1.):
+      return c * (x + y)
+    @my_fun.def_jvp
+    def my_jvp(primals, tangents):
+      x, y, c = primals
+      t_x, t_y, t_c = tangents
+      return my_fun(x, y, c), t_c
+    f = lambda x, y: jnp.square(my_fun(x, y, c=2.)).sum()
+    f(10., 5.)  # doesn't crash
+    jax.jvp(f, (10., 5.), (1., 1.))  # doesn't crash
+
+  def test_jvp_initial_style(self):
+    @custom_ad
+    def f(x):
+      return 3 * x
+    @f.def_jvp
+    def _(primals, tangents):
+      x, = primals
+      g, = tangents
+      return f(x), 2 * g
+
+    def foo(x):
+      out, _  = lax.scan(lambda c, _: (f(c), None), x, None, length=1)
+      return out
+
+    ans = jax.grad(foo)(3.)
+    expected = 2.
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+    ans = jax.grad(jax.jit(foo))(3.)
+    expected = 2.
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+    ans = jax.jit(jax.grad(foo))(3.)
+    expected = 2.
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+    ans = jax.grad(jax.grad(foo))(3.)
+    expected = 0.
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+    ans = jax.grad(jax.grad(jax.jit(foo)))(3.)
+    expected = 0.
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+    ans = jax.grad(jax.jit(jax.grad(foo)))(3.)
+    expected = 0.
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+    ans = jax.jit(jax.grad(jax.grad(foo)))(3.)
+    expected = 0.
+    self.assertAllClose(ans, expected, check_dtypes=False)
+
+  # TODO(dfm): CustomJVPTest.test_initial_style_vmap
+  # TODO(dfm): CustomJVPTest.test_initial_style_vmap_with_collective
+
+  def test_jvp_closed_over_tracers_error_message(self):
+    def f(x):
+      @custom_ad
+      def g(y):
+        return x + y
+      @g.def_jvp
+      def _(primals, tangents):
+        return g(x), 2 * primals[0]
+      return g(1.)
+
+    # TODO(dfm): Better error message.
+    jax.grad(f)(3.)
+
+    # self.assertRaises(ad.CustomJVPException, lambda: api.jvp(f, (3.,), (1.,)))
+    # self.assertRaises(ad.CustomJVPException, lambda: api.grad(f)(3.))
+
   @parameterized.parameters([(False,), (True,)])
   def test_jvp(self, with_jit: bool):
     wrap = jax.jit if with_jit else lambda f: f
