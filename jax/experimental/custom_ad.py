@@ -29,6 +29,7 @@ from jax._src import source_info_util
 from jax._src import traceback_util
 from jax._src import custom_derivatives as cd
 from jax._src.interpreters import ad
+from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.tree_util import (tree_flatten, tree_unflatten, treedef_children,
@@ -60,19 +61,33 @@ class custom_ad(Generic[T]):
 
   __getattr__ = custom_api_util.forward_attr
 
-  def def_jvp(self, jvp: Callable[..., tuple[T, T]]) -> None:
+  def defjvp(self, jvp: Callable[..., tuple[T, T]]) -> None:
     self.jvp = jvp
     return jvp
 
-  def def_fwd(self, fwd: Callable[..., tuple[T, Any]]) -> None:
+  def defjvps(self, *jvps: Callable[..., T] | None):
+    if self.nondiff_argnums:
+      raise TypeError("Can't use ``defjvps`` with ``nondiff_argnums``.")
+
+    def jvp(primals, tangents):
+      primal_out = self(*primals)
+      zeros = cd._zeros_like_pytree(primal_out)
+      all_tangents_out = [jvp(t, primal_out, *primals) if jvp else zeros
+                          for t, jvp in zip(tangents, jvps)]
+      tangent_out = tree_map(cd._sum_tangents, primal_out, *all_tangents_out)
+      return primal_out, tangent_out
+
+    self.defjvp(jvp)
+
+  def deffwd(self, fwd: Callable[..., tuple[T, Any]]) -> None:
     self.fwd = fwd
     return fwd
 
-  def def_bwd(self, bwd: Callable[..., tuple[Any, ...]]) -> None:
+  def defbwd(self, bwd: Callable[..., tuple[Any, ...]]) -> None:
     self.bwd = bwd
     return bwd
 
-  def def_lin(self, lin: Callable[..., T]) -> None:
+  def deflin(self, lin: Callable[..., T]) -> None:
     self.lin = lin
     return lin
 
@@ -460,15 +475,12 @@ def _transpose_lin_or_bwd(fun: lu.WrappedFun, res_type_thunk, in_avals):
 
   return transposed_fun
 
-
 def _custom_ad_impl(*args, prim_jaxpr: core.ClosedJaxpr, **_):
   return core.jaxpr_as_fun(prim_jaxpr)(*args)
-
 
 def _custom_ad_abstract_eval(*args, prim_jaxpr: core.ClosedJaxpr, **_):
   del args  # unused
   return prim_jaxpr.out_avals
-
 
 def _custom_ad_jvp(primals, tangents, *, num_consts: int, name: str,
     prim_jaxpr: core.ClosedJaxpr, jvp_jaxpr_thunk: Callable,
@@ -478,20 +490,63 @@ def _custom_ad_jvp(primals, tangents, *, num_consts: int, name: str,
   consts, primals_in = split_list(primals, [num_consts])
   _, tangents_in = split_list(tangents, [num_consts])
   tangents_in = map(ad.instantiate_zeros, tangents_in)
-  if bwd is None and lin is None:
-    # If neither bwd nor lin are defined, we don't bother deferring evaluation
-    # of the JVP rule; just evaluate it now.
-    jvp_jaxpr, jvp_consts = jvp_jaxpr_thunk()
-    out_flat = core.eval_jaxpr(jvp_jaxpr, jvp_consts, *primals_in, *tangents_in)
-  else:
-    out_flat = jvp_helper_p.bind(*consts, *primals_in, *tangents_in,
-                                 num_consts=num_consts, name=name,
-                                 prim_jaxpr=prim_jaxpr,
-                                 jvp_jaxpr_thunk=jvp_jaxpr_thunk,
-                                 fwd_jaxpr_thunk=fwd_jaxpr_thunk,
-                                 bwd=bwd, lin=lin)
+  out_flat = jvp_helper_p.bind(*consts, *primals_in, *tangents_in,
+                               num_consts=num_consts, name=name,
+                               prim_jaxpr=prim_jaxpr,
+                               jvp_jaxpr_thunk=jvp_jaxpr_thunk,
+                               fwd_jaxpr_thunk=fwd_jaxpr_thunk,
+                               bwd=bwd, lin=lin)
   primals_out, tangents_out = split_list(out_flat, [len(out_flat) // 2])
   return primals_out, tangents_out
+
+def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
+                        dims, num_consts: int, name: str,
+                        prim_jaxpr: core.ClosedJaxpr, jvp_jaxpr_thunk: Callable,
+                        fwd_jaxpr_thunk: Callable | None,
+                        bwd: lu.WrappedFun | None,
+                        lin: lu.WrappedFun | None):
+  in_batched = [d is not batching.not_mapped for d in dims]
+  prim_jaxpr_batched, out_dims = batching.batch_jaxpr(
+      prim_jaxpr, axis_size, in_batched, False, axis_name, spmd_axis_name,
+      main_type)
+
+  primals_out_batched = [d is not batching.not_mapped for d in out_dims]
+  _, primals_in_batched = split_list(in_batched, [num_consts])
+
+  @pe._memoize
+  def jvp_jaxpr_thunk_batched():
+    jvp_jaxpr, consts = jvp_jaxpr_thunk()
+    closed_jvp_jaxpr = pe.close_jaxpr(pe.convert_constvars_jaxpr(jvp_jaxpr))
+    jvp_in_batched = ((False,) * len(consts)
+                      + (*primals_in_batched, *primals_in_batched))
+    jvp_out_batched = (*primals_out_batched, *primals_out_batched)
+    batched_jaxpr, _ = batching.batch_jaxpr(
+        closed_jvp_jaxpr, axis_size, jvp_in_batched, jvp_out_batched, axis_name,
+        spmd_axis_name, main_type)
+    batched_consts = batched_jaxpr.consts
+    batched_jaxpr = pe.convert_envvars_to_constvars(
+        batched_jaxpr.jaxpr, num_consts)
+    return batched_jaxpr, (*batched_consts, *consts)
+
+  @pe._memoize
+  def fwd_jaxpr_thunk_batched():
+    assert 0, "TODO"
+
+  @lu.wrap_init
+  def bwd_batched(*args, **kwargs):
+    assert 0, "TODO"
+
+  @lu.wrap_init
+  def lin_batched(*args, **kwargs):
+    assert 0, "TODO"
+
+  out_batched = custom_ad_p.bind(
+      *args, num_consts=num_consts, name=name, prim_jaxpr=prim_jaxpr_batched,
+      jvp_jaxpr_thunk=jvp_jaxpr_thunk_batched,
+      fwd_jaxpr_thunk=fwd_jaxpr_thunk_batched if fwd_jaxpr_thunk else None,
+      bwd=bwd_batched if bwd else None, lin=lin_batched if lin else None)
+
+  return out_batched, [0 if b else batching.not_mapped for b in out_dims]
 
 
 # def _custom_ad_staging(
@@ -564,6 +619,9 @@ ad.primitive_jvps[custom_ad_p] = _custom_ad_jvp
 mlir.register_lowering(
     custom_ad_p, mlir.lower_fun(_custom_ad_impl, multiple_results=True))
 # pe.custom_staging_rules[custom_ad_p] = _custom_ad_staging
+batching.spmd_axis_primitive_batchers[custom_ad_p] = _custom_ad_batching
+batching.axis_primitive_batchers[custom_ad_p] = partial(
+    _custom_ad_batching, None)
 
 
 def _jvp_helper_impl(*args, num_consts: int, jvp_jaxpr_thunk, **_):
@@ -576,7 +634,6 @@ def _jvp_helper_abstract_eval(*args, prim_jaxpr: core.ClosedJaxpr, **_):
   del args  # unused
   out_avals = prim_jaxpr.out_avals
   return (*out_avals, *out_avals)
-
 
 def _jvp_helper_partial_eval(
     trace, *tracers, num_consts: int, name: str, prim_jaxpr: core.ClosedJaxpr,

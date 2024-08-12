@@ -69,6 +69,7 @@ import jax.custom_derivatives
 import jax.custom_transpose
 from jax.errors import (UnexpectedTracerError, TracerIntegerConversionError,
                         ConcretizationTypeError, TracerBoolConversionError)
+from jax.experimental import custom_ad
 from jax.experimental import pjit
 from jax.interpreters import ad
 from jax.interpreters import batching
@@ -6963,8 +6964,10 @@ class DCETest(jtu.JaxTestCase):
 
 class CustomJVPTest(jtu.JaxTestCase):
 
+  custom_jvp = jax.custom_jvp
+
   def test_basic(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return jnp.sin(x)
     def f_jvp(primals, tangents):
@@ -6980,7 +6983,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     self.assertAllClose(api.grad(f)(x), 2 * jnp.cos(x))
 
   def test_invariance(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return jnp.cos(2 * x) / 2.
     def f_jvp(primals, tangents):
@@ -7003,7 +7006,7 @@ class CustomJVPTest(jtu.JaxTestCase):
                         check_dtypes=False)
 
   def test_python_control_flow(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       if x > 0:
         return jnp.sin(x)
@@ -7030,7 +7033,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     self.assertAllClose(api.grad(f)(-x), 3., check_dtypes=False)
 
   def test_vmap(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       assert jnp.ndim(x) == 0
       return jnp.sin(x)
@@ -7065,7 +7068,7 @@ class CustomJVPTest(jtu.JaxTestCase):
                         (jnp.sin(xx), 2 * jnp.cos(xx) * xx))
 
   def test_jit(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return jnp.sin(x)
     def f_jvp(primals, tangents):
@@ -7091,7 +7094,7 @@ class CustomJVPTest(jtu.JaxTestCase):
                         check_dtypes=False)
 
   def test_pytrees(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return {'b': jnp.sin(x['a'])}
     def f_jvp(primals, tangents):
@@ -7108,7 +7111,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_kwargs(self):
     # from https://github.com/google/jax/issues/1938
-    @jax.custom_jvp
+    @self.custom_jvp
     def my_fun(x, y, c=1.):
       return c * (x + y)
     def my_jvp(primals, tangents):
@@ -7121,7 +7124,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     api.jvp(f, (10., 5.), (1., 1.))  # doesn't crash
 
   def test_initial_style(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return 3 * x
     def f_jvp(primals, tangents):
@@ -7163,7 +7166,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_initial_style_vmap(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       assert jnp.ndim(x) == 0
       return 3 * x
@@ -7211,7 +7214,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_initial_style_vmap_with_collective(self):
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return lax.psum(x, 'foo')
 
@@ -7231,7 +7234,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_closed_over_tracers_error_message(self):
     def f(x):
-      @jax.custom_jvp
+      @self.custom_jvp
       def g(y):
         return x + y
       def g_jvp(primals, tangents):
@@ -7243,7 +7246,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     self.assertRaises(ad.CustomJVPException, lambda: api.grad(f)(3.))
 
   def test_nondiff_arg(self):
-    @partial(jax.custom_jvp, nondiff_argnums=(0,))
+    @partial(self.custom_jvp, nondiff_argnums=(0,))
     def app(f, x):
       return f(x)
     def app_jvp(f, primals, tangents):
@@ -7270,7 +7273,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     # rule) or (2) static data (e.g. integers which parameterize shapes).
     raise unittest.SkipTest("behavior no longer supported")
 
-    @partial(jax.custom_jvp, nondiff_argnums=(0,))
+    @partial(self.custom_jvp, nondiff_argnums=(0,))
     def f(x, y):
       return x * y
     def f_jvp(x, primals, tangents):
@@ -7287,7 +7290,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_nondiff_arg_vmap_tracer(self):
-    @partial(jax.custom_jvp, nondiff_argnums=(0,))
+    @partial(self.custom_jvp, nondiff_argnums=(0,))
     def f(x, y):
       return x * y
     def f_jvp(x, primals, tangents):
@@ -7304,7 +7307,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_nondiff_arg_hiding_jvp_tracer(self):
     def f(x):
-      @partial(jax.custom_jvp, nondiff_argnums=(0,))
+      @partial(self.custom_jvp, nondiff_argnums=(0,))
       def g(h, x):
         return h(x)
       @g.defjvp
@@ -7325,7 +7328,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     raise unittest.SkipTest("TODO")  # TODO(mattjj): write test
 
   def test_missing_jvp_rule_error_message(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def foo(x):
       return x ** 2
 
@@ -7343,7 +7346,7 @@ class CustomJVPTest(jtu.JaxTestCase):
         lambda: api.grad(foo)(2.))
 
   def test_jvp_rule_inconsistent_pytree_structures_error_message(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return (x**2,)
 
@@ -7367,7 +7370,7 @@ class CustomJVPTest(jtu.JaxTestCase):
         lambda: api.jvp(f, (2.,), (1.,)))
 
   def test_primal_tangent_aval_disagreement_error_message(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return x ** 2
 
@@ -7389,7 +7392,7 @@ class CustomJVPTest(jtu.JaxTestCase):
   def test_jvp_rule_doesnt_return_pair_error_message(self):
     # https://github.com/google/jax/issues/2516
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return x ** 2
 
@@ -7415,7 +7418,7 @@ class CustomJVPTest(jtu.JaxTestCase):
       y, _ = jax.lax.scan(lambda x, _: (f(x), None), x, None, length=1)
       return y
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return x
 
@@ -7463,7 +7466,7 @@ class CustomJVPTest(jtu.JaxTestCase):
         lambda: jax.jvp(lambda x: scan_apply(f, x), (x,), (x,)))
 
   def test_multiple_rule_invocations(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def expit(x):
       return 1 / (1 + lax.exp(-x))
 
@@ -7492,7 +7495,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     api.jit(jax.vmap(jnp.linalg.det))(arr)  # doesn't crash
 
   def test_hard_stuff2(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return np.zeros(x.shape, x.dtype)
 
@@ -7510,7 +7513,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     jax.jvp(jax.vmap(f), (jnp.arange(3.),), (jnp.ones(3),))
 
   def test_hard_stuff3(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def relu(x):
       return jnp.maximum(x, 0)
 
@@ -7536,7 +7539,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     jax.jvp(jax.jit(jax.vmap(f)), (jnp.arange(3.),), (jnp.ones(3),))
 
   def test_eval_shape(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def expit(x):
       return 1 / (1 + lax.exp(-x))
 
@@ -7553,7 +7556,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_jaxpr_zeros(self):
     # from https://github.com/google/jax/issues/2657
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(A, b):
       return A @ b
 
@@ -7579,7 +7582,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     grad(experiment)(1.)  # doesn't crash
 
   def test_linear_in_scan(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return -x
 
@@ -7599,7 +7602,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_custom_jvps_first_rule_is_none(self):
     # https://github.com/google/jax/issues/3389
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x, y):
       return x ** 2 * y
 
@@ -7632,7 +7635,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_nondiff_argnums_vmap_tracer(self):
     # https://github.com/google/jax/issues/3964
-    @partial(jax.custom_jvp, nondiff_argnums=(0, 2))
+    @partial(self.custom_jvp, nondiff_argnums=(0, 2))
     def sample(shape, param, seed):
       return jax.random.uniform(key=seed, shape=shape, minval=param)
 
@@ -7652,7 +7655,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_fun_with_nested_calls_2(self):
     def call(f, *args):
-      f = jax.custom_jvp(f)
+      f = self.custom_jvp(f)
       f.defjvp(lambda primals, tangents: (f(*primals), sum(tangents)))
       return f(*args)
 
@@ -7677,7 +7680,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     alpha = np.float32(2.)
 
     def sample(seed):
-      @jax.custom_jvp
+      @self.custom_jvp
       def f(alpha):
         return jax.random.gamma(seed, alpha, shape=[])
 
@@ -7696,7 +7699,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     # https://github.com/google/jax/issues/8783
     def h(z):
       def f(x):
-        @jax.custom_jvp
+        @self.custom_jvp
         def g(y):
           return x * y
 
@@ -7715,7 +7718,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     self.assertAllClose(tangents, 2 * jnp.arange(3., dtype='float32'))
 
   def test_float0(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x, y):
       return x, y
     def f_jvp(primals, _):
@@ -7730,7 +7733,7 @@ class CustomJVPTest(jtu.JaxTestCase):
                         (primals, expected_tangents))
 
   def test_float0_initial_style(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x, y):
       return x, y
     def f_jvp(primals, _):
@@ -7749,7 +7752,7 @@ class CustomJVPTest(jtu.JaxTestCase):
                         (primals, expected_tangents))
 
   def test_remat(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return jnp.sin(x)
     def f_jvp(primals, tangents):
@@ -7771,7 +7774,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_remat_higher_order(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return jnp.sin(x)
     def f_jvp(primals, tangents):
@@ -7800,7 +7803,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     # over an array constant.
     y = jnp.arange(1., 4.)
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       assert jnp.ndim(x) == 0
       return 3 * x * jnp.sum(y)
@@ -7854,7 +7857,7 @@ class CustomJVPTest(jtu.JaxTestCase):
 
   def test_custom_jvp_vmap_broadcasting_interaction_2(self):
     # https://github.com/google/jax/issues/5849
-    @jax.custom_jvp
+    @self.custom_jvp
     def transform(box, R):
       if jnp.isscalar(box) or box.size == 1:
         return R * box
@@ -7895,7 +7898,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     if config.enable_x64.value:
       raise unittest.SkipTest("test only applies when x64 is disabled")
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def projection_unit_simplex(x: jax.Array) -> jax.Array:
       """Projection onto the unit simplex."""
       s = 1.0
@@ -7954,7 +7957,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     key = jax.random.key(seed)
     mat = jax.random.normal(key, (2, 3))
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(mat, aux):
       num_rows, num_cols = mat.shape
       return jnp.ones((num_rows, 1)) / num_cols
@@ -8001,7 +8004,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     # https://github.com/google/jax/issues/3056
     a = jnp.array([1., 1.])
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x):
       return a * x
 
@@ -8083,7 +8086,7 @@ class CustomJVPTest(jtu.JaxTestCase):
         return out
       return _fun
 
-    f = jax.custom_jvp(f)
+    f = self.custom_jvp(f)
 
     @partial(f.defjvp, symbolic_zeros=True)
     def f_jvp(primals, tangents):
@@ -8124,7 +8127,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     self.assertArraysAllClose(tangent_out2, jnp.array([99., 100.]))
 
   def test_symbolic_zero_custom_jvp_vmap_output(self):
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x, y):
       return x * y
 
@@ -8141,7 +8144,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     # Tests multiple zero patterns for partial_eval._memoize, and also tests
     # that we're okay with stores being occupied with equal values.
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x, y):
       return x * y
 
@@ -8159,7 +8162,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     # https://github.com/google/jax/issues/14833
     Zero = jax.custom_derivatives.SymbolicZero
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x, y):
         return x * y
 
@@ -8184,7 +8187,7 @@ class CustomJVPTest(jtu.JaxTestCase):
     def jvp_fn(primals, tangents):
       return jax.jvp(fun_wrapped, primals, tangents)
 
-    fn = jax.custom_jvp(fun_wrapped)
+    fn = self.custom_jvp(fun_wrapped)
     fn.defjvp(jvp_fn)
 
     self.assertEqual((1.0, 0.1), jax.grad(lambda args: fn(*args))((1.0, 2.0)))
@@ -8192,7 +8195,7 @@ class CustomJVPTest(jtu.JaxTestCase):
   def test_run_rules_more_than_once(self):
     # https://github.com/google/jax/issues/16614
 
-    @jax.custom_jvp
+    @self.custom_jvp
     def f(x, y):
       return x
 
@@ -11121,6 +11124,31 @@ class OverrideLoweringTest(jtu.JaxTestCase):
         .as_text()
     )
     self.assertNotIn("stablehlo.custom_call @Sharding", lowered_ir)
+
+
+class CustomADJVPTest(CustomJVPTest):
+  custom_jvp = custom_ad.custom_ad
+
+  def test_python_control_flow(self):
+    self.skipTest("Python control flow not supported")
+
+  # TODO(dfm): Enable tests once symbolic zeros are supported
+  def test_run_rules_more_than_once(self):
+    self.skipTest("Symbolic zeros not implemented")
+  def test_symbolic_zero_custom_jvp(self):
+    self.skipTest("Symbolic zeros not implemented")
+  def test_symbolic_zero_custom_jvp_jit(self):
+    self.skipTest("Symbolic zeros not implemented")
+  def test_symbolic_zero_custom_jvp_jit_vmap(self):
+    self.skipTest("Symbolic zeros not implemented")
+  def test_symbolic_zero_custom_jvp_vmap(self):
+    self.skipTest("Symbolic zeros not implemented")
+  def test_symbolic_zero_custom_jvp_vmap_output(self):
+    self.skipTest("Symbolic zeros not implemented")
+  def test_symbolic_zeros_memoization_caching(self):
+    self.skipTest("Symbolic zeros not implemented")
+  def test_symbolic_zeros_under_jit(self):
+    self.skipTest("Symbolic zeros not implemented")
 
 
 if __name__ == '__main__':
