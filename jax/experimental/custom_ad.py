@@ -515,9 +515,9 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
 
   @pe._memoize
   def jvp_jaxpr_thunk_batched():
-    jvp_jaxpr, consts = jvp_jaxpr_thunk()
+    jvp_jaxpr, jvp_consts = jvp_jaxpr_thunk()
     closed_jvp_jaxpr = pe.close_jaxpr(pe.convert_constvars_jaxpr(jvp_jaxpr))
-    jvp_in_batched = ((False,) * len(consts)
+    jvp_in_batched = ((False,) * len(jvp_consts)
                       + (*primals_in_batched, *primals_in_batched))
     jvp_out_batched = (*primals_out_batched, *primals_out_batched)
     batched_jaxpr, _ = batching.batch_jaxpr(
@@ -526,7 +526,7 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
     batched_consts = batched_jaxpr.consts
     batched_jaxpr = pe.convert_envvars_to_constvars(
         batched_jaxpr.jaxpr, num_consts)
-    return batched_jaxpr, (*batched_consts, *consts)
+    return batched_jaxpr, (*batched_consts, *jvp_consts)
 
   @pe._memoize
   def fwd_jaxpr_thunk_batched():
@@ -628,7 +628,6 @@ def _jvp_helper_impl(*args, num_consts: int, jvp_jaxpr_thunk, **_):
   _, args = split_list(args, [num_consts])
   jaxpr, consts = jvp_jaxpr_thunk()
   return core.eval_jaxpr(jaxpr, consts, *args)
-
 
 def _jvp_helper_abstract_eval(*args, prim_jaxpr: core.ClosedJaxpr, **_):
   del args  # unused
