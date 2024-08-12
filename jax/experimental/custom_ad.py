@@ -505,28 +505,30 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
                         fwd_jaxpr_thunk: Callable | None,
                         bwd: lu.WrappedFun | None,
                         lin: lu.WrappedFun | None):
+  args = [batching.moveaxis(x, d, 0) if d is not batching.not_mapped and d != 0
+          else x for x, d in zip(args, dims)]
   in_batched = [d is not batching.not_mapped for d in dims]
-  prim_jaxpr_batched, out_dims = batching.batch_jaxpr(
+  prim_jaxpr_batched, out_batched = batching.batch_jaxpr(
       prim_jaxpr, axis_size, in_batched, False, axis_name, spmd_axis_name,
       main_type)
+  out_dims1 = [0 if b else batching.not_mapped for b in out_batched]
+  out_dims2 = []
 
-  primals_out_batched = [d is not batching.not_mapped for d in out_dims]
   _, primals_in_batched = split_list(in_batched, [num_consts])
 
   @pe._memoize
   def jvp_jaxpr_thunk_batched():
-    jvp_jaxpr, jvp_consts = jvp_jaxpr_thunk()
-    closed_jvp_jaxpr = pe.close_jaxpr(pe.convert_constvars_jaxpr(jvp_jaxpr))
-    jvp_in_batched = ((False,) * len(jvp_consts)
-                      + (*primals_in_batched, *primals_in_batched))
-    jvp_out_batched = (*primals_out_batched, *primals_out_batched)
-    batched_jaxpr, _ = batching.batch_jaxpr(
-        closed_jvp_jaxpr, axis_size, jvp_in_batched, jvp_out_batched, axis_name,
-        spmd_axis_name, main_type)
-    batched_consts = batched_jaxpr.consts
-    batched_jaxpr = pe.convert_envvars_to_constvars(
-        batched_jaxpr.jaxpr, num_consts)
-    return batched_jaxpr, (*batched_consts, *jvp_consts)
+    jvp_jaxpr = core.ClosedJaxpr(*jvp_jaxpr_thunk())
+    jvp_in_batched = (*primals_in_batched, *primals_in_batched)
+    batched_jaxpr, out_batched = batching.batch_jaxpr(
+        jvp_jaxpr, axis_size, jvp_in_batched, False, axis_name, spmd_axis_name,
+        main_type)
+    primals_out_batched, tangents_out_batched = split_list(
+        out_batched, [len(out_batched) // 2])
+    out_batched = map(batching._merge_bdims, primals_out_batched,
+                      tangents_out_batched)
+    out_dims2.append([0 if b else batching.not_mapped for b in out_batched])
+    return batched_jaxpr.jaxpr, batched_jaxpr.consts
 
   @pe._memoize
   def fwd_jaxpr_thunk_batched():
@@ -546,7 +548,8 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
       fwd_jaxpr_thunk=fwd_jaxpr_thunk_batched if fwd_jaxpr_thunk else None,
       bwd=bwd_batched if bwd else None, lin=lin_batched if lin else None)
 
-  return out_batched, [0 if b else batching.not_mapped for b in out_dims]
+  out_dims = out_dims2[0] if out_dims2 else out_dims1
+  return out_batched, out_dims
 
 
 # def _custom_ad_staging(
