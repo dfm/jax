@@ -199,13 +199,13 @@ class custom_ad(Generic[T]):
     # Because this is an "initial style" primitive, we also want to stage out
     # all the rules (except for bwd), but we do that lazily to avoid infinite
     # recursions and to avoid evaluating the rules until we need them.
-    @pe._memoize
+    # @pe._memoize
     def jvp_jaxpr_thunk():
       jvp_avals_in = (*avals_in, *avals_in)
       jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(jvp, jvp_avals_in)
       return jaxpr, consts
 
-    @pe._memoize
+    # @pe._memoize
     def fwd_jaxpr_thunk():
       jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(fwd, avals_in)
       return jaxpr, consts
@@ -490,14 +490,24 @@ def _custom_ad_jvp(primals, tangents, *, num_consts: int, name: str,
   consts, primals_in = split_list(primals, [num_consts])
   _, tangents_in = split_list(tangents, [num_consts])
   tangents_in = map(ad.instantiate_zeros, tangents_in)
-  out_flat = jvp_helper_p.bind(*consts, *primals_in, *tangents_in,
-                               num_consts=num_consts, name=name,
-                               prim_jaxpr=prim_jaxpr,
-                               jvp_jaxpr_thunk=jvp_jaxpr_thunk,
-                               fwd_jaxpr_thunk=fwd_jaxpr_thunk,
-                               bwd=bwd, lin=lin)
+  if bwd is None and lin is None:
+    jvp_jaxpr, jvp_consts = jvp_jaxpr_thunk()
+    closed_jvp_jaxpr = pe.close_jaxpr(pe.convert_constvars_jaxpr(jvp_jaxpr))
+    out_flat = core.call(lu.wrap_init(core.jaxpr_as_fun(closed_jvp_jaxpr)),
+                         *jvp_consts, *primals_in, *tangents_in)
+  else:
+    out_flat = jvp_helper_p.bind(*consts, *primals_in, *tangents_in,
+                                 num_consts=num_consts, name=name,
+                                 prim_jaxpr=prim_jaxpr,
+                                 jvp_jaxpr_thunk=jvp_jaxpr_thunk,
+                                 fwd_jaxpr_thunk=fwd_jaxpr_thunk,
+                                 bwd=bwd, lin=lin)
   primals_out, tangents_out = split_list(out_flat, [len(out_flat) // 2])
   return primals_out, tangents_out
+
+def _custom_ad_transpose(ct, *args, prim_jaxpr: core.ClosedJaxpr, **_):
+  return ad.backward_pass(prim_jaxpr.jaxpr, None, prim_jaxpr.consts, args, ct)
+
 
 def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
                         dims, num_consts: int, name: str,
@@ -508,20 +518,22 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
   args = [batching.moveaxis(x, d, 0) if d is not batching.not_mapped and d != 0
           else x for x, d in zip(args, dims)]
   in_batched = [d is not batching.not_mapped for d in dims]
+  # TODO(dfm): Here and below: Why do we need instantiate = True?
   prim_jaxpr_batched, out_batched = batching.batch_jaxpr(
-      prim_jaxpr, axis_size, in_batched, False, axis_name, spmd_axis_name,
+      prim_jaxpr, axis_size, in_batched, True, axis_name, spmd_axis_name,
       main_type)
   out_dims1 = [0 if b else batching.not_mapped for b in out_batched]
   out_dims2 = []
 
   _, primals_in_batched = split_list(in_batched, [num_consts])
 
-  @pe._memoize
+  # @pe._memoize
   def jvp_jaxpr_thunk_batched():
-    jvp_jaxpr = core.ClosedJaxpr(*jvp_jaxpr_thunk())
+    blah = jvp_jaxpr_thunk()
+    jvp_jaxpr = core.ClosedJaxpr(*blah)
     jvp_in_batched = (*primals_in_batched, *primals_in_batched)
     batched_jaxpr, out_batched = batching.batch_jaxpr(
-        jvp_jaxpr, axis_size, jvp_in_batched, False, axis_name, spmd_axis_name,
+        jvp_jaxpr, axis_size, jvp_in_batched, True, axis_name, spmd_axis_name,
         main_type)
     primals_out_batched, tangents_out_batched = split_list(
         out_batched, [len(out_batched) // 2])
@@ -530,7 +542,7 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
     out_dims2.append([0 if b else batching.not_mapped for b in out_batched])
     return batched_jaxpr.jaxpr, batched_jaxpr.consts
 
-  @pe._memoize
+  # @pe._memoize
   def fwd_jaxpr_thunk_batched():
     assert 0, "TODO"
 
@@ -619,6 +631,7 @@ custom_ad_p.multiple_results = True
 custom_ad_p.def_impl(_custom_ad_impl)
 custom_ad_p.def_abstract_eval(_custom_ad_abstract_eval)
 ad.primitive_jvps[custom_ad_p] = _custom_ad_jvp
+ad.primitive_transposes[custom_ad_p] = _custom_ad_transpose
 mlir.register_lowering(
     custom_ad_p, mlir.lower_fun(_custom_ad_impl, multiple_results=True))
 # pe.custom_staging_rules[custom_ad_p] = _custom_ad_staging
