@@ -518,23 +518,34 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
   args = [batching.moveaxis(x, d, 0) if d is not batching.not_mapped and d != 0
           else x for x, d in zip(args, dims)]
   in_batched = [d is not batching.not_mapped for d in dims]
-  # TODO(dfm): Here and below: Why do we need instantiate = True?
-  prim_jaxpr_batched, out_batched = batching.batch_jaxpr(
-      prim_jaxpr, axis_size, in_batched, True, axis_name, spmd_axis_name,
+  prim_jaxpr_batched, prim_out_batched = batching.batch_jaxpr(
+      prim_jaxpr, axis_size, in_batched, False, axis_name, spmd_axis_name,
       main_type)
-  out_dims1 = [0 if b else batching.not_mapped for b in out_batched]
+  out_dims1 = [0 if b else batching.not_mapped for b in prim_out_batched]
   out_dims2 = []
 
   _, primals_in_batched = split_list(in_batched, [num_consts])
 
   # @pe._memoize
   def jvp_jaxpr_thunk_batched():
-    blah = jvp_jaxpr_thunk()
-    jvp_jaxpr = core.ClosedJaxpr(*blah)
+    jvp_jaxpr = core.ClosedJaxpr(*jvp_jaxpr_thunk())
     jvp_in_batched = (*primals_in_batched, *primals_in_batched)
+    # We need the primals and tangets to have the same batching. To work out
+    # the appropriate instantiate pattern, batch the jaxpr once, then
+    # use that output to decide on the pattern.
+    instantiate = [d is not batching.not_mapped for d in prim_out_batched]
+    instantiate = [*instantiate, *instantiate]
+    _, out_batched = batching.batch_jaxpr(
+        jvp_jaxpr, axis_size, jvp_in_batched, instantiate, axis_name,
+        spmd_axis_name, main_type)
+    primals_out_batched, tangents_out_batched = split_list(
+        out_batched, [len(out_batched) // 2])
+    out_batched = map(batching._merge_bdims, primals_out_batched,
+                      tangents_out_batched)
+    instantiate = [d is not batching.not_mapped for d in out_batched]
     batched_jaxpr, out_batched = batching.batch_jaxpr(
-        jvp_jaxpr, axis_size, jvp_in_batched, True, axis_name, spmd_axis_name,
-        main_type)
+        jvp_jaxpr, axis_size, jvp_in_batched, instantiate, axis_name,
+        spmd_axis_name, main_type)
     primals_out_batched, tangents_out_batched = split_list(
         out_batched, [len(out_batched) // 2])
     out_batched = map(batching._merge_bdims, primals_out_batched,
