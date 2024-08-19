@@ -8219,8 +8219,11 @@ class CustomJVPTest(jtu.JaxTestCase):
 
 class CustomVJPTest(jtu.JaxTestCase):
 
+  custom_vjp = jax.custom_vjp
+  defvjp = lambda f, fwd, bwd: f.defvjp(fwd, bwd)
+
   def test_basic(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return jnp.sin(x)
     def f_fwd(x):
@@ -8236,7 +8239,7 @@ class CustomVJPTest(jtu.JaxTestCase):
                         (jnp.sin(x), 2 * jnp.cos(x)))
 
   def test_invariance(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return jnp.cos(2 * x) / 2.
     def f_fwd(x):
@@ -8259,7 +8262,7 @@ class CustomVJPTest(jtu.JaxTestCase):
                         check_dtypes=False)
 
   def test_python_control_flow(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       if x > 0:
         return jnp.sin(x)
@@ -8285,7 +8288,7 @@ class CustomVJPTest(jtu.JaxTestCase):
                         check_dtypes=False)
 
   def test_vmap(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       assert jnp.ndim(x) == 0
       return jnp.sin(x)
@@ -8322,7 +8325,7 @@ class CustomVJPTest(jtu.JaxTestCase):
                         2 * jnp.cos(xx))
 
   def test_jit(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return jnp.sin(x)
     def f_fwd(x):
@@ -8346,7 +8349,7 @@ class CustomVJPTest(jtu.JaxTestCase):
                         check_dtypes=False)
 
   def test_pytrees(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return {'b': jnp.sin(x['a'])}
     def f_fwd(x):
@@ -8361,7 +8364,7 @@ class CustomVJPTest(jtu.JaxTestCase):
                         {'a': 2 * jnp.cos(x['a'])})
 
   def test_jvp_error(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return jnp.sin(x)
     def f_fwd(x):
@@ -8385,7 +8388,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_kwargs(self):
     # from https://github.com/google/jax/issues/1938
-    @jax.custom_vjp
+    @self.custom_vjp
     def my_fun(x, y, c=1.):
       return c * (x + y)
     my_fun.defvjp(lambda x, y, c=1.: (my_fun(c, y, c), None),
@@ -8395,7 +8398,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     api.grad(f)(10., 5.)  # doesn't crash
 
   def test_initial_style(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return jnp.sin(x)
     def f_fwd(x):
@@ -8417,7 +8420,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected)
 
   def test_initial_style_vmap(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       assert jnp.ndim(x) == 0
       return 3 * x
@@ -8440,7 +8443,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_nondiff_arg(self):
-    @partial(jax.custom_vjp, nondiff_argnums=(0,))
+    @partial(self.custom_vjp, nondiff_argnums=(0,))
     def app(f, x):
       return f(x)
     def app_fwd(f, x):
@@ -8466,7 +8469,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     # tracers in nondiff_argnums to greatly simplify bookkeeping while still
     # supporting the cases for which it is necessary.
     def outer(x):
-      @jax.custom_vjp
+      @self.custom_vjp
       def f(y):
         return x * y
       def f_fwd(y):
@@ -8490,7 +8493,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_closed_over_vmap_tracer(self):
     def outer(x):
-      @jax.custom_vjp
+      @self.custom_vjp
       def f(y):
         return x * y
       def f_fwd(y):
@@ -8510,7 +8513,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_closed_over_tracer3(self):
     def outer(x):
-      @jax.custom_vjp
+      @self.custom_vjp
       def f(y):
         return x * y
       def f_fwd(y):
@@ -8533,7 +8536,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     # This is similar to the old (now skipped) test_nondiff_arg_tracer, except
     # we're testing for the error message that usage pattern now raises.
 
-    @partial(jax.custom_vjp, nondiff_argnums=(0,))
+    @partial(self.custom_vjp, nondiff_argnums=(0,))
     def f(x, y):
       return x * y
     def f_fwd(x, y):
@@ -8558,7 +8561,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     raise unittest.SkipTest("TODO")  # TODO(mattjj): write test
 
   def test_missing_vjp_rule_error(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def foo(x):
       return x ** 2
 
@@ -8572,7 +8575,7 @@ class CustomVJPTest(jtu.JaxTestCase):
         lambda: api.grad(foo)(2.))
 
   def test_vjp_rule_inconsistent_pytree_structures_error(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return x
 
@@ -8599,7 +8602,7 @@ class CustomVJPTest(jtu.JaxTestCase):
         lambda: api.grad(f)(2.))
 
   def test_vjp_bwd_returns_non_tuple_error(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return x
 
@@ -8620,7 +8623,7 @@ class CustomVJPTest(jtu.JaxTestCase):
       y, _ = jax.lax.scan(lambda x, _: (f(x), None), x, None, length=1)
       return y
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return x
 
@@ -8694,7 +8697,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_clip_gradient(self):
     # https://github.com/google/jax/issues/2784
-    @jax.custom_vjp
+    @self.custom_vjp
     def _clip_gradient(lo, hi, x):
       return x  # identity function when not differentiating
 
@@ -8720,7 +8723,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     def f(x):
       return x ** 2
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def g(x):
       return f(x)
 
@@ -8753,7 +8756,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     x = jnp.ones((10, 3))
 
     # Create the custom function
-    @jax.custom_vjp
+    @self.custom_vjp
     def custom_fun(x):
       return x.sum()
 
@@ -8784,7 +8787,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     # over an array constant.
     y = jnp.arange(1., 4.)
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       assert jnp.ndim(x) == 0
       return 3 * x * jnp.sum(y)
@@ -8808,7 +8811,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_initial_style_vmap_with_collective(self):
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return lax.psum(x, 'foo')
 
@@ -8829,7 +8832,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_bwd_closes_over_tracer(self):
     def f(y):
-      @jax.custom_vjp
+      @self.custom_vjp
       def f(x):
         return 2. * jnp.sin(x)
 
@@ -8860,7 +8863,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_fwd_closes_over_tracer(self):
     def f(y):
-      @jax.custom_vjp
+      @self.custom_vjp
       def f(x):
         return 2. * jnp.sin(x)
 
@@ -8890,7 +8893,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, -2. * jnp.sin(4.))
 
   def test_float0(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, _):
       return x
     def f_fwd(x, _):
@@ -8906,7 +8909,7 @@ class CustomVJPTest(jtu.JaxTestCase):
                      (2., np.zeros(shape=(), dtype=float0)))
 
   def test_float0_initial_style(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return x
     def f_fwd(x):
@@ -8925,7 +8928,7 @@ class CustomVJPTest(jtu.JaxTestCase):
                      (2., np.zeros(shape=(), dtype=float0)))
 
   def test_remat(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return jnp.sin(x)
     def f_fwd(x):
@@ -8947,7 +8950,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_remat_higher_order(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return jnp.sin(x)
     def f_fwd(x):
@@ -8972,7 +8975,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_bwd_nones(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return x * jnp.sin(y)
     def f_fwd(x, y):
@@ -8986,7 +8989,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_bwd_nones_vmap(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return x * jnp.sin(y)
     def f_fwd(x, y):
@@ -9000,7 +9003,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_bwd_nones_pytree(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(xs, y):
       x1, x2 = xs
       return x1 * x2 * jnp.sin(y)
@@ -9016,7 +9019,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_custom_vjp_closure_4521(self):
     # https://github.com/google/jax/issues/4521
-    @jax.custom_vjp
+    @self.custom_vjp
     def g(x, y):
       return None
     def g_fwd(x, y):
@@ -9039,7 +9042,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     lax.scan(scan_body, jnp.ones(5), None, 100)  # doesn't crash
 
   def test_float0_bwd_none(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(i, x):
       return jnp.sin(x)
     def f_fwd(i, x):
@@ -9098,7 +9101,7 @@ class CustomVJPTest(jtu.JaxTestCase):
       self.assertLessEqual(len(aux_args), 1)
       return _cos_after(converted_fn, x, *aux_args)
 
-    @partial(jax.custom_vjp, nondiff_argnums=(0,))
+    @partial(self.custom_vjp, nondiff_argnums=(0,))
     def _cos_after(fn, x, *args):
       return jnp.cos(fn(x, *args))
 
@@ -9139,7 +9142,7 @@ class CustomVJPTest(jtu.JaxTestCase):
       self.assertLessEqual(len(aux_args), 1)
       return _cos_after(converted_fn, x, *aux_args)
 
-    @partial(jax.custom_vjp, nondiff_argnums=(0,))
+    @partial(self.custom_vjp, nondiff_argnums=(0,))
     def _cos_after(fn, x, *args):
       return jnp.cos(fn(x, *args))
 
@@ -9171,7 +9174,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(g_x, 17. * x, check_dtypes=False)
 
   def test_float0_cotangents_automatically_handled(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return x
 
@@ -9187,7 +9190,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_custom_vjp_scan_batching_edge_case(self):
     # https://github.com/google/jax/issues/5832
-    @jax.custom_vjp
+    @self.custom_vjp
     def mul(x, coeff): return x * coeff
     def mul_fwd(x, coeff): return mul(x, coeff), (x, coeff)
     def mul_bwd(res, g):
@@ -9220,7 +9223,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     # https://github.com/google/jax/issues/8783
     def h(z):
       def f(x):
-        @jax.custom_vjp
+        @self.custom_vjp
         def g(y):
           return x * y
 
@@ -9247,7 +9250,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
     tree_util.register_pytree_node(A, lambda x: (x, None), unflatten)
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return x[0]
     def f_fwd(x):
@@ -9260,7 +9263,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_vmap_vjp_called_twice(self):
     # https://github.com/google/jax/pull/14728
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return x
     f.defvjp(lambda x: (x, None), lambda _, y_bar: (y_bar,))
@@ -9272,7 +9275,7 @@ class CustomVJPTest(jtu.JaxTestCase):
   def test_symbolic_zero_custom_vjp_basic(self):
     ZERO = custom_derivatives_public.SymbolicZero
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y, z):
       return x, x
 
@@ -9341,7 +9344,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertArraysAllClose(gx, zero)
 
   def test_symbolic_zero_custom_vjp_bwd_shape_error(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y, z):
       return x, y, z
 
@@ -9394,7 +9397,7 @@ class CustomVJPTest(jtu.JaxTestCase):
         return out
       return _fun
 
-    f = jax.custom_vjp(f)
+    f = self.custom_vjp(f)
 
     def fwd(*args):
       xs, pert = [x.value for x in args], [x.perturbed for x in args]
@@ -9456,7 +9459,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertArraysAllClose(ct_in2, jnp.array([101., 102.]))
 
   def test_symbolic_zero_custom_vjp_vmap_output(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return x, y
 
@@ -9496,7 +9499,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
     x, y = Box(False, jnp.array(72.)), jnp.array(73.)
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(box, y):
       return box.x * y
 
@@ -9538,7 +9541,7 @@ class CustomVJPTest(jtu.JaxTestCase):
   def test_symbolic_zeros_memoization_caching(self):
     # Tests multiple zero patterns for partial_eval._memoize, and also tests
     # that we're okay with stores being occupied with equal values.
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return x * y
 
@@ -9557,7 +9560,7 @@ class CustomVJPTest(jtu.JaxTestCase):
   def test_run_rules_more_than_once(self):
     # https://github.com/google/jax/issues/16614
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return x + y
 
@@ -9586,7 +9589,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_nones_representing_zeros_in_subtrees_returned_by_bwd(self):
     # https://github.com/google/jax/issues/8356
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return x[0]
 
@@ -9601,7 +9604,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     jax.grad(f)((1.0, (2.0, 3.0)))  # don't crash
 
   def test_pytree_nones_returned_by_bwd(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return x[0]
 
@@ -9616,7 +9619,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     jax.grad(f)((1.0, (2.0, None)))  # don't crash
 
   def test_bwd_rule_shape_mismatch(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def foo(x, y):
       return x
 
@@ -9635,7 +9638,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_bwd_rule_shape_mismatch_disable(self):
     # TODO(mattjj): remove this test when the config option is removed
-    @jax.custom_vjp
+    @self.custom_vjp
     def foo(x, y):
       return x
 
@@ -9654,7 +9657,7 @@ class CustomVJPTest(jtu.JaxTestCase):
       jax.config.update('jax_custom_vjp_disable_shape_check', False)
 
   def test_bwd_rule_can_produce_list_or_tuple(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return x * y
 
@@ -9724,7 +9727,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(calc, expected)
 
   def test_optimize_remat_gh21303(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x):
       return jnp.tan(x)
 
@@ -9750,7 +9753,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     def f_(x, y):
       return jnp.sin(x) * y
 
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return f_(x, y)
 
@@ -9766,7 +9769,7 @@ class CustomVJPTest(jtu.JaxTestCase):
     self.assertAllClose(jax.grad(f)(x, y), jax.grad(f_)(x, y))
 
   def test_optimize_remat_kwargs(self):
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return jnp.sin(x) * y
 
@@ -9784,7 +9787,7 @@ class CustomVJPTest(jtu.JaxTestCase):
 
   def test_optimize_remat_custom_vmap(self):
     # See https://github.com/google/jax/pull/23000
-    @jax.custom_vjp
+    @self.custom_vjp
     def f(x, y):
       return jnp.sin(x) * y
 
@@ -11131,6 +11134,18 @@ class CustomADJVPTest(CustomJVPTest):
 
   def test_python_control_flow(self):
     self.skipTest("Python control flow not supported")
+  def test_missing_jvp_rule_error_message(self):
+    self.skipTest("This use shouldn't raise and error with custom_ad")
+  def test_nondiff_arg_vmap_tracer(self):
+    self.skipTest("Not supported")
+  def test_nondiff_argnums_vmap_tracer(self):
+    self.skipTest("Not supported")
+
+  # TODO(dfm): Enable tests once float0 is supported
+  def test_float0(self):
+    self.skipTest("float0 not implemented")
+  def test_float0_initial_style(self):
+    self.skipTest("float0 not implemented")
 
   # TODO(dfm): Enable tests once symbolic zeros are supported
   def test_run_rules_more_than_once(self):
@@ -11149,6 +11164,25 @@ class CustomADJVPTest(CustomJVPTest):
     self.skipTest("Symbolic zeros not implemented")
   def test_symbolic_zeros_under_jit(self):
     self.skipTest("Symbolic zeros not implemented")
+
+  # TODO(dfm): Test error message wording properly
+  def test_jvp_rule_doesnt_return_pair_error_message(self):
+    self.skipTest("Wording of error messages is inconsistent")
+  def test_jvp_rule_primal_out_type_doesnt_match_primal_error_message(self):
+    self.skipTest("Wording of error messages is inconsistent")
+  def test_primal_tangent_aval_disagreement_error_message(self):
+    self.skipTest("Wording of error messages is inconsistent")
+
+
+class CustomADVJPTest(CustomVJPTest):
+  custom_vjp = custom_ad.custom_ad
+
+  def test_jvp_error(self):
+    self.skipTest("This use shouldn't raise and error with custom_ad")
+
+  # TODO(dfm): Enable tests once float0 is supported
+  def test_float0_initial_style(self):
+    self.skipTest("float0 not implemented")
 
 
 if __name__ == '__main__':
