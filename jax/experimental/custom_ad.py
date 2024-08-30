@@ -214,13 +214,13 @@ class custom_ad(Generic[T]):
     # Because this is an "initial style" primitive, we also want to stage out
     # all the rules (except for bwd), but we do that lazily to avoid infinite
     # recursions and to avoid evaluating the rules until we need them.
-    # @pe._memoize
+    @pe._memoize
     def jvp_jaxpr_thunk():
       jvp_avals_in = (*avals_in, *avals_in)
       jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(jvp, jvp_avals_in)
       return jaxpr, consts
 
-    # @pe._memoize
+    @pe._memoize
     def fwd_jaxpr_thunk():
       jaxpr, _, consts, () = pe.trace_to_jaxpr_dynamic(fwd, avals_in)
       return jaxpr, consts
@@ -532,7 +532,7 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
 
   _, primals_in_batched = split_list(in_batched, [num_consts])
 
-  # @pe._memoize
+  @pe._memoize
   def jvp_jaxpr_thunk_batched():
     jvp_jaxpr = core.ClosedJaxpr(*jvp_jaxpr_thunk())
     jvp_in_batched = (*primals_in_batched, *primals_in_batched)
@@ -559,7 +559,7 @@ def _custom_ad_batching(spmd_axis_name, axis_size, axis_name, main_type, args,
     out_dims2.append([0 if b else batching.not_mapped for b in out_batched])
     return batched_jaxpr.jaxpr, batched_jaxpr.consts
 
-  # @pe._memoize
+  @pe._memoize
   def fwd_jaxpr_thunk_batched():
     assert 0, "TODO"
 
