@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 from collections.abc import Callable, Mapping, Sequence
 import ctypes
 import functools
@@ -22,10 +20,15 @@ from typing import Any, overload
 
 import numpy as np
 
+import jax.sharding as shd
 from jax._src import core
+from jax._src import custom_partitioning
 from jax._src import deprecations
 from jax._src import dispatch
 from jax._src import effects
+from jax._src import mesh as mesh_lib
+from jax._src import sharding_impls
+from jax._src import tree_util
 from jax._src import util
 from jax._src.callback import callback_batching_rule
 from jax._src.interpreters import ad
@@ -286,6 +289,7 @@ def ffi_call(
     *deprecated_args: ArrayLike,
     has_side_effect: bool = False,
     vmap_method: str | None = None,
+    num_batch_dims: int | None = None,
     input_layouts: Sequence[FfiLayoutOptions] | None = None,
     output_layouts: FfiLayoutOptions | Sequence[FfiLayoutOptions] | None = None,
     input_output_aliases: dict[int, int] | None = None,
@@ -444,6 +448,7 @@ def ffi_call(
         result_avals=result_avals,
         vectorized=vectorized,
         vmap_method=vmap_method,
+        num_batch_dims=num_batch_dims,
         target_name=target_name,
         has_side_effect=has_side_effect,
         input_layouts=static_input_layouts,
@@ -581,6 +586,109 @@ def ffi_call_transpose(*args, target_name, **_):
 def ffi_call_lowering(
     ctx: mlir.LoweringRuleContext,
     *operands: ir.Value,
+    num_batch_dims: int | None,
+    result_avals: tuple[core.AbstractValue, ...],
+    **params,
+) -> Sequence[ir.Value]:
+  if not num_batch_dims:
+    return _ffi_call_lowering(ctx, *operands, **params)
+
+  batch_dims, = {x.shape[:num_batch_dims] for x in ctx.avals_in}
+  assert len(batch_dims) == num_batch_dims
+
+  axis_context = ctx.module_context.axis_context
+  if (isinstance(axis_context, sharding_impls.SPMDAxisContext) and
+      set(axis_context.manual_axes) == set(axis_context.mesh.axis_names)):
+    return _ffi_call_lowering(ctx, *operands, **params)
+
+  mesh = mesh_lib.thread_resources.env.physical_mesh
+  if isinstance(axis_context, sharding_impls.ShardingContext):
+    devices = axis_context.device_assignment
+    if devices is None:
+      raise AssertionError(
+          'Please file a bug at https://github.com/jax-ml/jax/issues')
+    am = axis_context.abstract_mesh
+    if am is not None:
+      mesh = mesh_lib.Mesh(np.array(devices).reshape(am.axis_sizes),
+                           am.axis_names)
+  elif isinstance(axis_context, sharding_impls.SPMDAxisContext):
+    devices = axis_context.mesh._flat_devices_tuple
+  else:
+    devices = None
+
+  if not devices or len(devices) == 1:
+    return _ffi_call_lowering(ctx, *operands, **params)
+
+  def to_mesh_pspec_sharding(hlo_sharding, ndim):
+    if hlo_sharding is None:
+      return hlo_sharding
+    if mesh.empty:  # or not decode_shardings
+      assert devices is not None
+      return sharding_impls._op_sharding_to_pos_sharding(hlo_sharding, devices)
+    pspec = sharding_impls.parse_flatten_op_sharding(
+        hlo_sharding, mesh)[0].get_partition_spec()
+    pspec = shd.PartitionSpec(*pspec, *((None,) * (ndim - len(pspec))))
+    return shd.NamedSharding(mesh, pspec)
+
+  placeholder = object()
+  in_tree = tree_util.tree_structure((placeholder,) * len(operands))
+  out_tree = tree_util.tree_structure((placeholder,) * len(result_avals))
+
+  fun = functools.partial(ffi_call_p.bind, num_batch_dims=num_batch_dims,
+                          **params)
+  partition = functools.partial(_partition, fun, num_batch_dims, result_avals)
+  infer_sharding_from_operands = functools.partial(
+      _infer_sharding_from_operands, num_batch_dims)
+
+  sharding_callback_info = custom_partitioning._ShardingCallbackInfo(
+      None, partition, to_mesh_pspec_sharding, in_tree, out_tree,
+      infer_sharding_from_operands, ctx.module_context, mesh, [])
+  key = str(id(sharding_callback_info))
+  custom_partitioning._sharding_callbacks[
+      bytes(key, 'utf8')] = sharding_callback_info
+  ctx.module_context.add_keepalive(sharding_callback_info)
+
+  rule = ffi_lowering(
+      custom_partitioning._CUSTOM_PARTITIONING_CALL_NAME, api_version=2,
+      backend_config=key)
+  return rule(ctx, *operands)
+
+
+def _supported_sharding(num_batch_dims, sharding, arg):
+  rank = len(arg.shape)
+  assert num_batch_dims <= rank
+  names = tuple(sharding.spec[:num_batch_dims])
+  names += tuple(None for _ in range(rank - num_batch_dims))
+  return shd.NamedSharding(sharding.mesh, shd.PartitionSpec(*names))
+
+def _partition(fun, num_batch_dims, result_avals, mesh, arg_shapes, result_shapes):
+  sharding = arg_shapes[0].sharding
+  arg_shardings = tuple(
+      _supported_sharding(num_batch_dims, sharding, x) for x in arg_shapes)
+  result_shardings = tuple(
+      _supported_sharding(num_batch_dims, sharding, x) for x in result_shapes)
+  def wrapped(*args):
+    batch_dims = core.get_aval(args[0]).shape[:num_batch_dims]
+    result_avals_ = [
+        core.ShapedArray(batch_dims + x.shape[num_batch_dims:], x.dtype)
+        for x in result_avals]
+    return fun(*args, result_avals=result_avals_)
+  return (
+      mesh,
+      wrapped,
+      tuple(result_shardings),
+      tuple(arg_shardings),
+  )
+
+def _infer_sharding_from_operands(num_batch_dims, mesh, arg_shapes, result_shapes):
+  del mesh  # unused
+  sharding = arg_shapes[0].sharding
+  return tuple(map(
+      lambda x: _supported_sharding(num_batch_dims, sharding, x), result_shapes))
+
+def _ffi_call_lowering(
+    ctx: mlir.LoweringRuleContext,
+    *operands: ir.Value,
     target_name: str,
     has_side_effect: bool,
     input_layouts: Sequence[Sequence[int]],
@@ -603,6 +711,7 @@ def ffi_call_lowering(
 ffi_call_p = core.Primitive("ffi_call")
 ffi_call_p.multiple_results = True
 dispatch.simple_impl(ffi_call_p)
+dispatch.prim_requires_devices_during_lowering.add(ffi_call_p)
 ffi_call_p.def_effectful_abstract_eval(ffi_call_abstract_eval)
 ad.primitive_jvps[ffi_call_p] = ffi_call_jvp
 ad.primitive_transposes[ffi_call_p] = ffi_call_transpose

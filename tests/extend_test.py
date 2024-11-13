@@ -24,6 +24,7 @@ import jax
 from jax import lax
 import jax.extend as jex
 import jax.numpy as jnp
+import jax.sharding as shd
 
 from jax._src import abstract_arrays
 from jax._src import api
@@ -341,6 +342,14 @@ class FfiTest(jtu.JaxTestCase):
     with self.assertRaisesRegex(
         ValueError, "All elements of result_shape_dtypes.*position 1"):
       jex.ffi.ffi_call("test", (jax.ShapeDtypeStruct((), np.float32), ()))()
+
+  def testPartitioning(self):
+    def fun(x):
+      return ffi_call_geqrf(x, num_batch_dims=len(x.shape) - 2)
+    mesh = jtu.create_mesh((2,), ('x',))
+    x = self.rng().randn(10, 5, 4).astype(np.float32)
+    x = jax.device_put(x, shd.NamedSharding(mesh, shd.PartitionSpec('x')))
+    self.assertNotIn("all-gather", jax.jit(fun).lower(x).compile().as_text())
 
 
 def ffi_call_geqrf(x, **kwargs):
