@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 from typing import Any
 
 import numpy as np
@@ -22,14 +23,28 @@ from jax._src.pjit import pjit_p
 from jax._src.named_call import named_call_p
 
 
+@contextlib.contextmanager
+def eval_using_numpy(allow_xla: bool = False):
+  with core.set_current_trace(NumpyTrace(allow_xla=allow_xla)):
+    yield
+
+
 class NumpyTrace(core.Trace):
+  def __init__(self, allow_xla: bool = False):
+    self.allow_xla = allow_xla
+
   def process_primitive(self, primitive, tracers, params):
     print(f"Interpreting {primitive} using numpy")
     rule = primitive_numpy_rules.get(primitive)
     if not rule:
-      raise NotImplementedError(
-          f"Numpy evaluation rule for {primitive} not implemented")
-    return rule(*tracers, **params)
+      if self.allow_xla:
+        with core.set_current_trace(core.eval_trace):
+          return primitive.impl(*tracers, **params)
+      else:
+        raise NotImplementedError(
+            f"Numpy evaluation rule for {primitive} not implemented")
+    with core.set_current_trace(self):
+      return rule(*tracers, **params)
 
   def process_call(self, primitive, f, tracers, params):
     if primitive == named_call_p:
@@ -42,31 +57,35 @@ class NumpyTrace(core.Trace):
             f"Numpy evaluation rule for named call {name} not implemented")
       out = rule(*tracers)
       return out if multiple_results else [out]
-    return f.call_wrapped(*tracers)
+    with core.set_current_trace(self):
+      return f.call_wrapped(*tracers)
 
   def process_map(self, primitive, f, tracers, **_):
     del primitive  # unused
-    return f.call_wrapped(*tracers)
+    with core.set_current_trace(self):
+      return f.call_wrapped(*tracers)
 
   def process_custom_transpose(self, primitive, call, tracers, **_):
     del primitive  # unused
-    return call.call_wrapped(*tracers)
+    with core.set_current_trace(self):
+      return call.call_wrapped(*tracers)
 
   def process_custom_jvp_call(self, primitive, fun, jvp, tracers, **_):
     del primitive, jvp  # unused
-    return fun.call_wrapped(*tracers)
+    with core.set_current_trace(self):
+      return fun.call_wrapped(*tracers)
 
   def process_custom_vjp_call(self, primitive, fun, fwd, bwd, tracers, **_):  # pytype: disable=signature-mismatch
     del primitive, fwd, bwd  # unused
-    return fun.call_wrapped(*tracers)
+    with core.set_current_trace(self):
+      return fun.call_wrapped(*tracers)
 
-numpy_trace = NumpyTrace()
 
 primitive_numpy_rules: dict[core.Primitive, Any] = {}
 
 def pjit_numpy_rule(*args, jaxpr, **_):
-  with core.set_current_trace(numpy_trace):
-    return core.jaxpr_as_fun(jaxpr)(*args)
+  # with core.set_current_trace(numpy_trace):
+  return core.jaxpr_as_fun(jaxpr)(*args)
 primitive_numpy_rules[pjit_p] = pjit_numpy_rule
 
 primitive_numpy_rules[lax.add_p] = np.add
