@@ -44,6 +44,22 @@ class NumpyTrace(core.Trace):
       return out if multiple_results else [out]
     return f.call_wrapped(*tracers)
 
+  def process_map(self, primitive, f, tracers, **_):
+    del primitive  # unused
+    return f.call_wrapped(*tracers)
+
+  def process_custom_transpose(self, primitive, call, tracers, **_):
+    del primitive  # unused
+    return call.call_wrapped(*tracers)
+
+  def process_custom_jvp_call(self, primitive, fun, jvp, tracers, **_):
+    del primitive, jvp  # unused
+    return fun.call_wrapped(*tracers)
+
+  def process_custom_vjp_call(self, primitive, fun, fwd, bwd, tracers, **_):  # pytype: disable=signature-mismatch
+    del primitive, fwd, bwd  # unused
+    return fun.call_wrapped(*tracers)
+
 numpy_trace = NumpyTrace()
 
 primitive_numpy_rules: dict[core.Primitive, Any] = {}
@@ -60,9 +76,8 @@ primitive_numpy_rules[lax.div_p] = np.divide
 primitive_numpy_rules[lax.sin_p] = np.sin
 primitive_numpy_rules[lax.cos_p] = np.cos
 
-def convert_element_type_numpy_rule(x, *, new_dtype, **params):
-  del params
-  return np.astype(x, dtype=new_dtype)
+def convert_element_type_numpy_rule(x, *, new_dtype, **_):
+  return np.asarray(x, dtype=new_dtype)
 primitive_numpy_rules[lax.convert_element_type_p] = convert_element_type_numpy_rule
 
 named_call_numpy_rules = {}

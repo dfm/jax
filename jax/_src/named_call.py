@@ -51,8 +51,15 @@ def named_call(
 
   return wrapped
 
+
 named_call_p = core.CallPrimitive("named_call")
 named_call_p.def_impl(core.call_impl)
+
+def _named_call_pp_rule(eqn: core.JaxprEqn,
+                        context: core.JaxprPpContext,
+                        settings: core.JaxprPpSettings) -> core.pp.Doc:
+  return core._pp_eqn(eqn, context, settings, params=["name", "call_jaxpr"])
+core.pp_eqn_rules[named_call_p] = _named_call_pp_rule
 
 # TODO(dfm): Add updaters to other interpreters. At least batching?
 def drop_name_from_call(params, *_):
