@@ -49,6 +49,7 @@ from jax._src.lax import lax as lax_internal
 from jax._src.lax.lax import (PrecisionLike,_array_copy,
                               _sort_le_comparator, _sort_lt_comparator)
 from jax._src.lib import xla_client as xc
+from jax._src.named_call import named_call
 from jax._src.numpy.array_creation import (empty, empty_like, full,
                                            ones, ones_like, zeros, zeros_like)
 from jax._src.numpy import indexing
@@ -9981,7 +9982,11 @@ def searchsorted(a: ArrayLike, v: ArrayLike, side: str = 'left',
       'sort': _searchsorted_via_sort,
       'compare_all': _searchsorted_via_compare_all,
   }[method]
-  return impl(a, v, side, dtype)  # type: ignore
+  return named_call(
+      "jax.numpy.searchsorted",
+      impl,  # type: ignore
+      static_argnums=(2, 3),
+  )(a, v, side, dtype)
 
 
 @export
