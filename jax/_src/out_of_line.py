@@ -1,7 +1,5 @@
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from functools import wraps
-from typing import Any
 
 from jax._src import api_util
 from jax._src import core
@@ -36,7 +34,7 @@ def out_of_line(fun: Callable, *, static_argnums: Sequence[int] = ()):
     args_flat, in_tree = tree_util.tree_flatten(dyn_args)
     flat_fun, out_tree = api_util.flatten_fun_nokwargs(f_, in_tree)
     in_avals = tuple(core.get_aval(x) for x in args_flat)
-    key = OutOfLineCallKey(
+    key = core.JaxprModuleKey(
         fun=fun, static_argnums=tuple(static_argnums), static_args=static_args,
         in_avals=in_avals, transformation_stack=())
     out_flat = out_of_line_call_p.bind(flat_fun, *args_flat, in_tree=in_tree,
@@ -46,28 +44,17 @@ def out_of_line(fun: Callable, *, static_argnums: Sequence[int] = ()):
   return wrapped
 
 
-@dataclass(frozen=True)
-class OutOfLineCallKey:
-  fun: Callable
-  static_argnums: tuple[int, ...]
-  static_args: tuple[Any, ...]
-  in_avals: tuple[core.AbstractValue, ...]
-  transformation_stack: tuple[Any, ...]
-
-  def __repr__(self):
-    prefix = " ".join(f"{t} of" for t in self.transformation_stack)
-    name = util.fun_qual_name(self.fun)
-    sig = ", ".join(a.str_short() for a in self.in_avals)
-    static = ""
-    if self.static_args:
-      static = "["
-      static += ", ".join(
-          f"{n}: {a}" for n, a in zip(self.static_argnums, self.static_args))
-      static += "]"
-    return f"{prefix}{name}{static}({sig})"
-
-
 class OutOfLineCallPrimitive(core.CallPrimitive):
+  def get_bind_params(self, params, module: core.JaxprModule | None = None):
+    assert module is not None
+    key = params["key"]
+    jaxpr, *_ = module[key]
+    subfun = lu.hashable_partial(
+        lu.wrap_init(core.eval_jaxpr, debug_info=jaxpr.debug_info), jaxpr, ())
+    # if config.dynamic_shapes.value:
+    #   subfun = lu.annotate(subfun, _jaxpr_type_to_callable_annotation(jaxpr))
+    return [subfun], params
+
   def bind_with_trace(self, trace, fun_and_args, params):
     fun = fun_and_args[0]
     args = fun_and_args[1:]
@@ -88,12 +75,14 @@ def djt_process_out_of_line_call(
   in_tracers = map(trace.to_jaxpr_tracer, [*implicit_tracers, *explicit_tracers])
 
   key = params["key"]
-  if key in trace.frame.functions:
-    jaxpr, out_type, consts, stores = trace.frame.functions[key]
+  if key in trace.frame.module:
+    jaxpr, out_type, consts, stores = trace.frame.module[key]
     f.populate_stores(stores)
   else:
     jaxpr, out_type, consts = pe.trace_to_jaxpr_dynamic2(f)
-    trace.frame.functions[key] = jaxpr, out_type, consts, f.stores
+    trace.frame.module[key] = core.JaxprModuleValue(jaxpr, out_type, consts, f.stores)
+
+  # TODO(dfm): Probably need to handle dynamic shapes here...
 
   source_info = source_info_util.current()
   out_tracers = [pe.DynamicJaxprTracer(trace, aval, source_info)
@@ -102,7 +91,7 @@ def djt_process_out_of_line_call(
   invars = map(trace.getvar, in_tracers)
   constvars = map(trace.getvar, map(trace.to_jaxpr_tracer, consts))
   outvars = map(trace.makevar, out_tracers)
-  new_params = dict(params, call_jaxpr=pe.convert_constvars_jaxpr(jaxpr))
+  new_params = dict(params)
   new_params["num_consts"] += len(consts)
   eqn = pe.new_jaxpr_eqn(
       [*constvars, *invars], outvars, primitive,  new_params, jaxpr.effects,

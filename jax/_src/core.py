@@ -48,7 +48,7 @@ from jax._src import linear_util as lu
 
 from jax._src import source_info_util
 from jax._src.util import (safe_zip, safe_map, curry, tuple_insert,
-                           tuple_delete, cache,
+                           tuple_delete, cache, fun_qual_name,
                            HashableFunction, HashableWrapper, weakref_lru_cache,
                            partition_list, StrictABCMeta, foreach)
 import jax._src.pretty_printer as pp
@@ -87,7 +87,7 @@ DebugInfo = lu.DebugInfo
 
 class Jaxpr:
   __slots__ = ['__weakref__', '_constvars', '_invars', '_outvars', '_eqns',
-               '_effects', '_debug_info']
+               '_effects', '_debug_info', '_module']
 
   _constvars: list[Var]
   _invars: list[Var]
@@ -95,6 +95,7 @@ class Jaxpr:
   _eqns: list[JaxprEqn]
   _effects: Effects
   _debug_info: DebugInfo
+  _module: JaxprModule
 
   @property
   def constvars(self) -> list[Var]:
@@ -120,6 +121,10 @@ class Jaxpr:
   def debug_info(self) -> DebugInfo:
     return self._debug_info
 
+  @property
+  def module(self) -> JaxprModule:
+    return self._module
+
   def __init__(self, constvars: Sequence[Var], invars: Sequence[Var],
                outvars: Sequence[Atom], eqns: Sequence[JaxprEqn],
                effects: Effects = no_effects,
@@ -127,6 +132,7 @@ class Jaxpr:
                # compatibility we have to allow calls when the debug_info
                # is missing.
                debug_info: DebugInfo = None,  # type: ignore[annotation-type-mismatch,assignment]
+               module: JaxprModule | None = None,
                ):
     """
     Args:
@@ -151,6 +157,7 @@ class Jaxpr:
     # TODO(necula): re-enable these safety checks
     # assert (len(debug_info.arg_names) == len(invars)), (debug_info, invars)
     # assert (len(debug_info.result_paths) == len(outvars)), (debug_info, outvars)
+    self._module = module or JaxprModule()
 
   def __str__(self):
     return str(self.pretty_print())
@@ -556,6 +563,54 @@ def _effect_free_abstract_eval(abstract_eval):
   def abstract_eval_(*args, **kwargs):
     return abstract_eval(*args, **kwargs), no_effects
   return abstract_eval_
+
+# -------------------- out-of-line jaxpr functions --------------------
+
+@dataclass(frozen=True)
+class JaxprModuleKey:
+  fun: Callable
+  static_argnums: tuple[int, ...]
+  static_args: tuple[Any, ...]
+  in_avals: tuple[AbstractValue, ...]
+  transformation_stack: tuple[Any, ...]
+
+  def __repr__(self):
+    prefix = " ".join(f"{t} of" for t in self.transformation_stack)
+    name = fun_qual_name(self.fun)
+    sig = ", ".join(a.str_short() for a in self.in_avals)
+    static = ""
+    if self.static_args:
+      static = "["
+      static += ", ".join(
+          f"{n}: {a}" for n, a in zip(self.static_argnums, self.static_args))
+      static += "]"
+    return f"{prefix}{name}{static}({sig})"
+
+class JaxprModuleValue(NamedTuple):
+  jaxpr: Jaxpr
+  out_type: Sequence[Any]
+  consts: Sequence[Any]
+  stores: Sequence[Any]
+
+class JaxprModule:
+  __slots__ = ['_functions']
+  _functions: dict[JaxprModuleKey, JaxprModuleValue]
+
+  def __init__(self):
+    self._functions = {}
+
+  def __getitem__(self, key: JaxprModuleKey) -> JaxprModuleValue:
+    return self._functions[key]
+
+  def __setitem__(self, key: JaxprModuleKey, value: JaxprModuleValue):
+    self._functions[key] = value
+
+  def __contains__(self, key: JaxprModuleKey) -> bool:
+    return key in self._functions
+
+  def items(self):
+    return self._functions.items()
+
 
 # -------------------- lifting --------------------
 
@@ -3020,9 +3075,12 @@ def pp_toplevel_jaxpr(jaxpr_to_print: Jaxpr, *,
           s.append(subjaxpr)
           names.setdefault(subjaxpr, name)
 
+    docs = []
+    for k, v in jaxpr_to_print.module.items():
+      docs.append(pp_jaxpr_function(k, v, context, settings))
+
     # Pull jaxprs occurring more than once to the top-level, making sure
     # that their names are unique.
-    docs = []
     name_counts = Counter[str]()
     for jaxpr, c in jaxpr_counts.items():
       if c == 1:
@@ -3231,6 +3289,20 @@ def pp_jaxpr_skeleton(jaxpr: Jaxpr, eqns_fn, context: JaxprPpContext,
     pp.keyword(pp.text("in ")), outvars,
     pp.concat(eff_text)
   ])) + pp.text(" }"))
+
+
+def pp_jaxpr_function(
+    k: JaxprModuleKey,
+    v: JaxprModuleValue,
+    context: JaxprPpContext,
+    settings: JaxprPpSettings,
+) -> pp.Doc:
+  return pp.concat([
+      pp.text("let " + str(k) + " = "),
+      pp_jaxpr(v.jaxpr, context, settings),
+      pp.text(" in"),
+      pp.brk(),
+  ])
 
 
 def pp_shared_jaxpr(

@@ -1660,7 +1660,7 @@ class JaxprStackFrame:
   attrs_inits: list
   attrs_vars: list[Var]
   debug_info: core.DebugInfo
-  functions: dict[Any, Any]
+  module: core.JaxprModule
 
   def __init__(self, debug_info: core.DebugInfo):
     self.gensym = core.gensym()
@@ -1675,7 +1675,7 @@ class JaxprStackFrame:
     self.attrs_inits = []
     self.attrs_vars = []
     self.debug_info = debug_info
-    self.functions = {}
+    self.module = core.JaxprModule()
 
   def add_eqn(self, eqn: core.JaxprEqn):
     self.eqns.append(eqn)
@@ -1696,7 +1696,7 @@ class JaxprStackFrame:
     constvars, constvals = unzip2(self.constvar_to_val.items())
     jaxpr_effects = make_jaxpr_effects(constvars, self.invars, explicit_outvars, self.eqns)
     jaxpr = Jaxpr(constvars, invars, outvars, self.eqns, jaxpr_effects,
-                  debug_info)
+                  debug_info, self.module)
     jaxpr, constvals = _const_folding_and_forwarding(jaxpr, constvals)
     jaxpr, constvals = _inline_literals(jaxpr, constvals)
     init_trees = [tree_structure(init_val) for init_val in self.attrs_inits]
@@ -1712,7 +1712,7 @@ class JaxprStackFrame:
     jaxpr_effects = make_jaxpr_effects(constvars, self.invars, expl_outvars,
                                         self.eqns)
     jaxpr = Jaxpr(constvars, self.invars, expl_outvars, self.eqns,
-                  jaxpr_effects, debug_info)
+                  jaxpr_effects, debug_info, self.module)
     # We can't run check_jaxpr until after we normalize.
     jaxpr, constvals = _const_folding_and_forwarding(jaxpr, constvals)
     jaxpr, constvals = _inline_literals(jaxpr, constvals)
@@ -1781,7 +1781,7 @@ def _const_folding_and_forwarding(
   jaxpr_effects = make_jaxpr_effects(new_constvars, jaxpr.invars, new_outvars,
                                       new_eqns)
   new_jaxpr = Jaxpr(new_constvars, jaxpr.invars, new_outvars, new_eqns,
-                    jaxpr_effects, jaxpr.debug_info)
+                    jaxpr_effects, jaxpr.debug_info, jaxpr.module)
   return new_jaxpr, new_constvals
 
 ConstFoldRule = Callable[
@@ -1844,7 +1844,7 @@ def _inline_literals(
   jaxpr_effects = make_jaxpr_effects(new_constvars, new_invars, new_outvars,
                                       new_eqns)
   new_jaxpr = Jaxpr(new_constvars, new_invars, new_outvars, new_eqns,
-                    jaxpr_effects, jaxpr.debug_info)
+                    jaxpr_effects, jaxpr.debug_info, jaxpr.module)
   return new_jaxpr, new_constvals
 
 
@@ -2386,7 +2386,7 @@ def _add_implicit_outputs(jaxpr: Jaxpr) -> tuple[Jaxpr, OutputType]:
   out_type = tuple(zip(out_avals, kept_outs))
 
   new_jaxpr = Jaxpr(jaxpr.constvars, jaxpr.invars, outvars, jaxpr.eqns,
-                    jaxpr.effects, jaxpr.debug_info)
+                    jaxpr.effects, jaxpr.debug_info, jaxpr.module)
   config.enable_checks.value and core.check_jaxpr(jaxpr)
   return new_jaxpr, out_type
 
