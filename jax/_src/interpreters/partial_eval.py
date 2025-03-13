@@ -1660,6 +1660,7 @@ class JaxprStackFrame:
   attrs_inits: list
   attrs_vars: list[Var]
   debug_info: core.DebugInfo
+  functions: dict[Any, Any]
 
   def __init__(self, debug_info: core.DebugInfo):
     self.gensym = core.gensym()
@@ -1674,6 +1675,7 @@ class JaxprStackFrame:
     self.attrs_inits = []
     self.attrs_vars = []
     self.debug_info = debug_info
+    self.functions = {}
 
   def add_eqn(self, eqn: core.JaxprEqn):
     self.eqns.append(eqn)
