@@ -36,11 +36,11 @@ def out_of_line(fun: Callable, *, static_argnums: Sequence[int] = ()):
     args_flat, in_tree = tree_util.tree_flatten(dyn_args)
     flat_fun, out_tree = api_util.flatten_fun_nokwargs(f_, in_tree)
     in_avals = tuple(core.get_aval(x) for x in args_flat)
-    key = core.JaxprModuleKey(
+    call = core.JaxprModuleKey(
         fun=fun, static_argnums=tuple(static_argnums), static_args=static_args,
         in_avals=in_avals, transformation_stack=())
     out_flat = out_of_line_call_p.bind(flat_fun, *args_flat, in_tree=in_tree,
-                                       key=key, num_consts=0)
+                                       call=call, num_consts=0)
     return tree_util.tree_unflatten(out_tree(), out_flat)
 
   return wrapped
@@ -49,8 +49,8 @@ def out_of_line(fun: Callable, *, static_argnums: Sequence[int] = ()):
 class OutOfLineCallPrimitive(core.CallPrimitive):
   def get_bind_params(self, params, module: core.JaxprModule | None = None):
     assert module is not None
-    key = params["key"]
-    jaxpr, *_ = module[key]
+    call = params["call"]
+    jaxpr, *_ = module[call]
     subfun = lu.hashable_partial(
         lu.wrap_init(core.eval_jaxpr, debug_info=jaxpr.debug_info), jaxpr, ())
     # if config.dynamic_shapes.value:
@@ -76,13 +76,13 @@ def djt_process_out_of_line_call(
   implicit_tracers = pe._extract_implicit_args(trace, f.in_type, explicit_tracers)
   in_tracers = map(trace.to_jaxpr_tracer, [*implicit_tracers, *explicit_tracers])
 
-  key = params["key"]
-  if key in trace.frame.module:
-    jaxpr, out_type, consts, stores = trace.frame.module[key]
+  call = params["call"]
+  if call in trace.frame.module:
+    jaxpr, out_type, consts, stores = trace.frame.module[call]
     f.populate_stores(stores)
   else:
     jaxpr, out_type, consts = pe.trace_to_jaxpr_dynamic2(f)
-    trace.frame.module[key] = core.JaxprModuleValue(jaxpr, out_type, consts, f.stores)
+    trace.frame.module[call] = core.JaxprModuleValue(jaxpr, out_type, consts, f.stores)
 
   # TODO(dfm): Probably need to handle dynamic shapes here...
 
@@ -112,15 +112,13 @@ def jvp_process_out_of_line_call(
   tangents = [t if type(t) is not ad.Zero else None for t in tangents]
   args, in_tree = tree_util.tree_flatten((primals, tangents))
   f_jvp = ad.jvp_subtrace(f, trace.tag)
-  f_jvp, which_nz_out = ad.nonzero_tangent_outputs(f_jvp)
+  f_jvp, _ = ad.nonzero_tangent_outputs(f_jvp)
   f_jvp, out_tree = ad.traceable(f_jvp, in_tree)
-  # update_params = call_param_updaters.get(call_primitive)
-  # new_params = update_params(params, which_nz) if update_params else params
 
-  key = params["key"]
+  call = params["call"]
   new_params = dict(params)
-  new_params["key"] = dataclasses.replace(key,
-      transformation_stack=key.transformation_stack + (JVPOf(tuple(which_nz)),))
+  new_params["call"] = dataclasses.replace(call,
+      transformation_stack=(JVPOf(tuple(which_nz)),) + call.transformation_stack)
 
   fun_and_args = (ad._update_annotation(f_jvp, f.in_type, which_nz),) + tuple(args)
   result = primitive.bind_with_trace(trace.parent_trace, fun_and_args, new_params)
