@@ -575,7 +575,7 @@ class JaxprModuleKey:
   transformation_stack: tuple[Any, ...]
 
   def __repr__(self):
-    prefix = " ".join(f"{t} of" for t in self.transformation_stack)
+    prefix = " ".join(f"{t} of " for t in self.transformation_stack)
     name = fun_qual_name(self.fun)
     sig = ", ".join(a.str_short() for a in self.in_avals)
     static = ""

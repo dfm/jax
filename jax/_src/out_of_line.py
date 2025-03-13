@@ -1,4 +1,5 @@
 from collections.abc import Callable, Sequence
+import dataclasses
 from functools import wraps
 
 from jax._src import api_util
@@ -7,6 +8,7 @@ from jax._src import linear_util as lu
 from jax._src import util
 from jax._src import source_info_util
 from jax._src import tree_util
+from jax._src.interpreters import ad
 from jax._src.interpreters import partial_eval as pe
 
 map = util.safe_map
@@ -100,3 +102,38 @@ def djt_process_out_of_line_call(
   return [t for t, (_, keep) in zip(out_tracers, out_type) if keep]
 
 pe.DynamicJaxprTrace.process_out_of_line_call = djt_process_out_of_line_call
+
+def jvp_process_out_of_line_call(
+    trace: ad.JVPTrace, primitive: OutOfLineCallPrimitive, f: lu.WrappedFun,
+    tracers, params):
+  assert primitive.multiple_results
+  primals, tangents = util.unzip2(map(trace.to_primal_tangent_pair, tracers))
+  which_nz = [     type(t) is not ad.Zero           for t in tangents]
+  tangents = [t if type(t) is not ad.Zero else None for t in tangents]
+  args, in_tree = tree_util.tree_flatten((primals, tangents))
+  f_jvp = ad.jvp_subtrace(f, trace.tag)
+  f_jvp, which_nz_out = ad.nonzero_tangent_outputs(f_jvp)
+  f_jvp, out_tree = ad.traceable(f_jvp, in_tree)
+  # update_params = call_param_updaters.get(call_primitive)
+  # new_params = update_params(params, which_nz) if update_params else params
+
+  key = params["key"]
+  new_params = dict(params)
+  new_params["key"] = dataclasses.replace(key,
+      transformation_stack=key.transformation_stack + (JVPOf(tuple(which_nz)),))
+
+  fun_and_args = (ad._update_annotation(f_jvp, f.in_type, which_nz),) + tuple(args)
+  result = primitive.bind_with_trace(trace.parent_trace, fun_and_args, new_params)
+  primal_out, tangent_out = tree_util.tree_unflatten(out_tree(), result)
+  tangent_out = [ad.Zero.from_primal_value(p) if t is None else t
+                  for p, t in zip(primal_out, tangent_out)]
+  return [ad.maybe_jvp_tracer(trace, p, t) for p, t in zip(primal_out, tangent_out)]
+
+ad.JVPTrace.process_out_of_line_call = jvp_process_out_of_line_call
+
+@dataclasses.dataclass(frozen=True)
+class JVPOf:
+  nz: tuple[bool, ...]
+
+  def __repr__(self):
+    return f"jvp{self.nz}"
