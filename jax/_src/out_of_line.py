@@ -9,6 +9,7 @@ from jax._src import util
 from jax._src import source_info_util
 from jax._src import tree_util
 from jax._src.interpreters import ad
+from jax._src.interpreters import batching
 from jax._src.interpreters import partial_eval as pe
 
 map = util.safe_map
@@ -103,6 +104,13 @@ def djt_process_out_of_line_call(
 
 pe.DynamicJaxprTrace.process_out_of_line_call = djt_process_out_of_line_call
 
+@dataclasses.dataclass(frozen=True)
+class JVPOf:
+  nz: tuple[bool, ...]
+
+  def __repr__(self):
+    return f"jvp{self.nz}"
+
 def jvp_process_out_of_line_call(
     trace: ad.JVPTrace, primitive: OutOfLineCallPrimitive, f: lu.WrappedFun,
     tracers, params):
@@ -130,8 +138,37 @@ def jvp_process_out_of_line_call(
 ad.JVPTrace.process_out_of_line_call = jvp_process_out_of_line_call
 
 @dataclasses.dataclass(frozen=True)
-class JVPOf:
-  nz: tuple[bool, ...]
+class VmapOf:
+  dims: tuple[int | None, ...]
 
   def __repr__(self):
-    return f"jvp{self.nz}"
+    return f"vmap{self.dims}"
+
+def batching_process_out_of_line_call(
+    trace: batching.BatchTrace,
+    primitive: OutOfLineCallPrimitive,
+    f: lu.WrappedFun,
+    tracers,
+    params,
+):
+  assert primitive.multiple_results
+  # params = dict(params, name=params.get('name', f.__name__))
+  vals, dims = util.unzip2(map(trace.to_batch_info, tracers))
+  segment_lens, dims = batching.indirectify_ragged_axes(dims)
+  assert not segment_lens, "TODO"
+  f_, dims_out = batching.batch_subtrace(f, trace.tag, trace.axis_data, tuple(dims))
+  f_ = batching._update_annotation(
+      f_, f.in_type, trace.axis_data.size, trace.axis_data.name, dims, segment_lens)
+
+  call = params["call"]
+  new_params = dict(params)
+  new_params["call"] = dataclasses.replace(call,
+      transformation_stack=(VmapOf(tuple(dims)),) + call.transformation_stack)
+
+  with core.set_current_trace(trace.parent_trace):
+    vals_out = primitive.bind(f_, *segment_lens, *vals, **new_params)
+  vals_out, dims_out = batching.resolve_ragged_axes(vals_out, dims_out())
+  src = source_info_util.current()
+  return [batching.BatchTracer(trace, v, d, src) for v, d in zip(vals_out, dims_out)]
+
+batching.BatchTrace.process_out_of_line_call = batching_process_out_of_line_call
