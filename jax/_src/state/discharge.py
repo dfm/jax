@@ -192,7 +192,7 @@ def _eval_jaxpr_discharge_state(
         # Default primitive rule, similar to `core.eval_jaxpr`. Note that here
         # we assume any higher-order primitives inside of the jaxpr are *not*
         # stateful.
-        subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
+        subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params, module=jaxpr.module)
         ans = eqn.primitive.bind(*subfuns, *map(env.read, eqn.invars),
                                 **bind_params)
     if eqn.primitive.multiple_results:

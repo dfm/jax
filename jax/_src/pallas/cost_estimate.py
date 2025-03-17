@@ -64,7 +64,7 @@ def cost_estimate_jaxpr(
   total_cost = CostEstimate(flops=0, transcendentals=0, bytes_accessed=0)
 
   for eqn in jaxpr.eqns:
-    _, bind_params = eqn.primitive.get_bind_params(eqn.params)
+    _, bind_params = eqn.primitive.get_bind_params(eqn.params, module=jaxpr.module)
     rule = _cost_rules.get(eqn.primitive, None)
     if rule is not None:
       context = Context(avals_in=[v.aval for v in eqn.invars],

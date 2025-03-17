@@ -1269,7 +1269,7 @@ def _interpret_jaxpr(jaxpr, *args, compiler_params, interpret_params):
           if not prim.multiple_results:
             out = out[0]
         else:
-          subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
+          subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params, module=jaxpr.module)
           out = prim.bind(*subfuns, *deferred_invals(), **bind_params)
 
       out = out if prim.multiple_results else [out]

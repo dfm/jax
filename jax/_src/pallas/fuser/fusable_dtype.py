@@ -244,7 +244,7 @@ def physicalize_interp(
       if custom_rule:
         outvals = custom_rule(ctx, *invals, **eqn.params)
       else:
-        subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
+        subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params, module=jaxpr.module)
         outvals = eqn.primitive.bind(*subfuns, *invals, **bind_params)
 
     if eqn.primitive.multiple_results:

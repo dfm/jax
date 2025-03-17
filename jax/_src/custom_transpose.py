@@ -176,7 +176,7 @@ class CustomTransposePrimitive(core.Primitive):
 
   # TODO(frostig,mattjj): consider keeping `call` as a named parameter
   # instead of following this "call primitive" convention.
-  def get_bind_params(self, params):
+  def get_bind_params(self, params, **_):
     assert 'call_jaxpr' in params
     assert 'transpose_jaxpr_thunk' in params
     new_params: dict[str, Any] = dict(params)

@@ -556,7 +556,7 @@ class Primitive:
     raise NotImplementedError("Abstract evaluation for '{}' not implemented"
                               .format(self.name))
 
-  def get_bind_params(self, params):
+  def get_bind_params(self, params, **_):
     return [], params
 
 
@@ -638,7 +638,7 @@ def eval_jaxpr(jaxpr: Jaxpr, consts, *args, propagate_source_info=True) -> list[
   foreach(write, jaxpr.invars, args)
   lu = last_used(jaxpr)
   for eqn in jaxpr.eqns:
-    subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
+    subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params, module=jaxpr.module)
     name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
     traceback = eqn.source_info.traceback if propagate_source_info else None
     with source_info_util.user_context(
@@ -2526,7 +2526,7 @@ class CallPrimitive(Primitive):
     args = fun_and_args[1:]
     return trace.process_call(self, fun, args, params)
 
-  def get_bind_params(self, params):
+  def get_bind_params(self, params, **_):
     new_params = dict(params)
     jaxpr = new_params.pop('call_jaxpr')
     subfun = lu.hashable_partial(lu.wrap_init(eval_jaxpr, debug_info=jaxpr.debug_info),
@@ -2545,7 +2545,7 @@ call_p.def_impl(call_impl)
 
 
 class ClosedCallPrimitive(CallPrimitive):
-  def get_bind_params(self, params):
+  def get_bind_params(self, params, **_):
     new_params = dict(params)
     jaxpr: ClosedJaxpr = new_params.pop('call_jaxpr')
     subfun = lu.wrap_init(partial(eval_jaxpr, jaxpr.jaxpr, jaxpr.consts),
@@ -2575,7 +2575,7 @@ class MapPrimitive(Primitive):
   def process(self, trace, fun, tracers, params):
     return trace.process_map(self, fun, tracers, params)
 
-  def get_bind_params(self, params):
+  def get_bind_params(self, params, **_):
     new_params = dict(params)
     jaxpr: Jaxpr = new_params.pop('call_jaxpr')
     subfun = lu.hashable_partial(

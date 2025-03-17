@@ -358,7 +358,7 @@ def backward_pass(jaxpr: core.Jaxpr, transform_stack,
         type(x) is not Literal and x not in primal_env for x in eqn.invars):
       lin_eqns.append(eqn)
       continue
-    subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
+    subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params, module=jaxpr.module)
     name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
     traceback = eqn.source_info.traceback
     with source_info_util.user_context(

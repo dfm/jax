@@ -2560,7 +2560,7 @@ def call_padding_rule(prim, in_avals, out_avals, *args, call_jaxpr, **params):
   padded_jaxpr, padded_consts = pad_jaxpr(call_jaxpr, ())
   if padded_consts: raise NotImplementedError
   new_params = dict(params, call_jaxpr=padded_jaxpr)
-  subfuns, bind_params = prim.get_bind_params(new_params)
+  subfuns, bind_params = prim.get_bind_params(new_params, module=padded_jaxpr.module)
   return prim.bind(*subfuns, *args, **bind_params)
 
 

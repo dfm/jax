@@ -58,7 +58,7 @@ def _custom_evaluate_jaxpr(
   util.safe_map(write, jaxpr.invars, args)
   lu = core.last_used(jaxpr)
   for eqn in jaxpr.eqns:
-    subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params)
+    subfuns, bind_params = eqn.primitive.get_bind_params(eqn.params, module=jaxpr.module)
 
     if eqn.primitive in disallowed_primitives:
       raise NotImplementedError(f'Primitive {eqn.primitive} not supported.')

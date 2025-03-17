@@ -382,7 +382,7 @@ class CustomJVPCallPrimitive(core.Primitive):
   def impl(self, fun, _, *args):
     raise NotImplementedError
 
-  def get_bind_params(self, params):
+  def get_bind_params(self, params, **_):
     new_params = dict(params)
     call_jaxpr: core.ClosedJaxpr = new_params.pop('call_jaxpr')
     num_consts: int = new_params.pop('num_consts')
