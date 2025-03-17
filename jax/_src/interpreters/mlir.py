@@ -823,6 +823,7 @@ class LoweringRuleContext:
   # Override module_context.platforms if not None. Used during multi-platform
   # lowering, when in a scope with a subset of the module_context.platforms.
   platforms: Sequence[str] | None = None
+  module: core.JaxprModule | None = None
 
   def set_tokens_out(self, tokens_out: TokenSet):
     assert self.tokens_out is None, 'Should only set `tokens_out` once.'
@@ -1680,7 +1681,8 @@ def lower_jaxpr_to_fun(
         module_context=ctx, name_stack=name_stack, primitive=None,
         avals_in=[], avals_out=None,
         tokens_in=TokenSet.create([]), tokens_out=None,
-        axis_size_env=None, dim_var_values=dim_var_values)
+        axis_size_env=None, dim_var_values=dim_var_values,
+        module=jaxpr.jaxpr.module)
     if not use_sharding_annotations and ir_arg_shardings is not None:
       flat_args = [
           a if s is None else wrap_with_sharding_op(entry_lowering_ctx, a, a_aval, s)
@@ -1975,7 +1977,8 @@ def jaxpr_subcomp(ctx: ModuleContext, jaxpr: core.Jaxpr,
           name_stack=source_info.name_stack,
           avals_in=avals_in,
           avals_out=map(aval, eqn.outvars), tokens_in=tokens_in,
-          tokens_out=None, jaxpr_eqn_ctx=eqn.ctx, dim_var_values=dim_var_values)
+          tokens_out=None, jaxpr_eqn_ctx=eqn.ctx, dim_var_values=dim_var_values,
+          module=jaxpr.module)
       if config.dynamic_shapes.value:
         axis_size_env = {d: read(d)
                          for a in avals_in if type(a) is core.DShapedArray

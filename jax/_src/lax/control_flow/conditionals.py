@@ -654,7 +654,8 @@ def _join_cond_pe_staged_jaxpr_inputs(jaxprs: Sequence[core.ClosedJaxpr],
     jaxpr_aug = core.Jaxpr(jaxpr.jaxpr.constvars, aug_invars,
                            jaxpr.jaxpr.outvars, jaxpr.jaxpr.eqns,
                            jaxpr.jaxpr.effects,
-                           jaxpr.jaxpr.debug_info)
+                           jaxpr.jaxpr.debug_info,
+                           jaxpr.jaxpr.module)
     return core.ClosedJaxpr(jaxpr_aug, jaxpr.consts)
 
   return tuple(map(augment_jaxpr, jaxprs, res_aval_indices_per_jaxpr))

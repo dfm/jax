@@ -834,7 +834,7 @@ def tracers_to_jaxpr(
   jaxpr_effects = make_jaxpr_effects(const_vars, invars, outvars, eqns)
   jaxpr = Jaxpr(const_vars, invars,  # type: ignore[arg-type]
                 outvars, eqns, jaxpr_effects,
-                debug_info)
+                debug_info)  # TODO(dfm): module here
   config.enable_checks.value and core.check_jaxpr(jaxpr)
   # del getvar  # needed to avoid cyclic-reference closure, apparently!
   return jaxpr, const_vals, env_vals
@@ -853,7 +853,8 @@ def convert_constvars_jaxpr(jaxpr: Jaxpr) -> Jaxpr:
   lifted_jaxpr = Jaxpr(constvars=(),
                        invars=jaxpr.constvars + jaxpr.invars,
                        outvars=jaxpr.outvars, eqns=jaxpr.eqns,
-                       effects=jaxpr.effects, debug_info=dbg)
+                       effects=jaxpr.effects, debug_info=dbg,
+                       module=jaxpr.module)
   config.enable_checks.value and core.check_jaxpr(lifted_jaxpr)
   return lifted_jaxpr
 
@@ -878,7 +879,8 @@ def convert_envvars_to_constvars(jaxpr: Jaxpr, num_env_vars: int) -> Jaxpr:
   env_vars, invars = split_list(jaxpr.invars, [num_env_vars])
   converted_jaxpr = Jaxpr(constvars=jaxpr.constvars + env_vars,
                           invars=invars, outvars=jaxpr.outvars, eqns=jaxpr.eqns,
-                          effects=jaxpr.effects, debug_info=jaxpr.debug_info)
+                          effects=jaxpr.effects, debug_info=jaxpr.debug_info,
+                          module=jaxpr.module)
   config.enable_checks.value and core.check_jaxpr(converted_jaxpr)
   return converted_jaxpr
 
@@ -1159,7 +1161,8 @@ def _partial_eval_jaxpr_custom_cached(
   known_effects = make_jaxpr_effects(jaxpr.constvars, ins_known_and_ref_res,
                                      known_outvars, known_eqns)
   jaxpr_known = Jaxpr(jaxpr.constvars, ins_known_and_ref_res, known_outvars,
-                      known_eqns, known_effects, jaxpr.debug_info)
+                      known_eqns, known_effects, jaxpr.debug_info,
+                      jaxpr.module)
   config.enable_checks.value and core.check_jaxpr(jaxpr_known)
 
   _, ins_staged = partition_list(in_inst, jaxpr.invars)
@@ -1169,7 +1172,7 @@ def _partial_eval_jaxpr_custom_cached(
                                       outs_staged, staged_eqns)
   jaxpr_staged = Jaxpr(jaxpr.constvars, staged_invars,
                        outs_staged, staged_eqns, staged_effects,
-                       jaxpr.debug_info)
+                       jaxpr.debug_info, jaxpr.module)
   config.enable_checks.value and core.check_jaxpr(jaxpr_staged)
 
   return (jaxpr_known, jaxpr_staged, out_unknowns, out_inst, len(residuals),
@@ -1461,7 +1464,8 @@ def _dce_jaxpr(jaxpr: Jaxpr, used_outputs: tuple[bool, ...],
       jaxpr.debug_info.traced_for, jaxpr.debug_info.func_src_info,
       jaxpr.debug_info.filter_arg_names(used_inputs),
       jaxpr.debug_info.filter_result_paths(used_outputs))
-  new_jaxpr = Jaxpr(jaxpr.constvars, invars, outvars, eqns, jaxpr_effects, dbg)
+  new_jaxpr = Jaxpr(jaxpr.constvars, invars, outvars, eqns, jaxpr_effects, dbg,
+                    jaxpr.module)
   config.enable_checks.value and core.check_jaxpr(new_jaxpr)
 
   return new_jaxpr, used_inputs
@@ -1539,7 +1543,8 @@ def _move_binders_to_front(closed_jaxpr: ClosedJaxpr, to_move: tuple[bool, ...]
   new_jaxpr = Jaxpr(closed_jaxpr.jaxpr.constvars, new_invars,
                     closed_jaxpr.jaxpr.outvars, closed_jaxpr.jaxpr.eqns,
                     closed_jaxpr.jaxpr.effects,
-                    closed_jaxpr.jaxpr.debug_info)
+                    closed_jaxpr.jaxpr.debug_info,
+                    closed_jaxpr.jaxpr.module)
   new_closed_jaxpr = core.ClosedJaxpr(new_jaxpr, closed_jaxpr.consts)
   return new_closed_jaxpr
 

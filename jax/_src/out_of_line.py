@@ -10,6 +10,7 @@ from jax._src import source_info_util
 from jax._src import tree_util
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
+from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 
 map = util.safe_map
@@ -66,6 +67,13 @@ class OutOfLineCallPrimitive(core.CallPrimitive):
 
 out_of_line_call_p = OutOfLineCallPrimitive("out_of_line_call")
 out_of_line_call_p.def_impl(core.call_impl)
+
+
+def eval_process_out_of_line_call(self, primitive, f, tracers, params):
+  return primitive.impl(f, *tracers, **params)
+
+
+core.EvalTrace.process_out_of_line_call = eval_process_out_of_line_call
 
 
 def djt_process_out_of_line_call(
@@ -172,3 +180,13 @@ def batching_process_out_of_line_call(
   return [batching.BatchTracer(trace, v, d, src) for v, d in zip(vals_out, dims_out)]
 
 batching.BatchTrace.process_out_of_line_call = batching_process_out_of_line_call
+
+
+def out_of_line_call_lowering(
+    ctx: mlir.LoweringRuleContext, *args, **params):
+  assert ctx.module is not None
+  jaxpr, _, consts, _ = ctx.module[params["call"]]
+  return mlir.core_call_lowering(
+    ctx, *consts, *args, name=None, call_jaxpr=jaxpr)
+
+mlir.register_lowering(out_of_line_call_p, out_of_line_call_lowering)
