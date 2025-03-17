@@ -184,6 +184,7 @@ class Jaxpr:
         eqns=kwargs.pop("eqns", self.eqns),
         effects=kwargs.pop("effects", self.effects),
         debug_info=kwargs.pop("debug_info", self.debug_info),
+        module=kwargs.pop("module", self.module),
     )
     if kwargs:
       raise ValueError(f"Unknown keyword arguments: {kwargs}")
