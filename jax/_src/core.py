@@ -3076,12 +3076,9 @@ def pp_toplevel_jaxpr(jaxpr_to_print: Jaxpr, *,
           s.append(subjaxpr)
           names.setdefault(subjaxpr, name)
 
-    docs = []
-    for k, v in jaxpr_to_print.module.items():
-      docs.append(pp_jaxpr_function(k, v, context, settings))
-
     # Pull jaxprs occurring more than once to the top-level, making sure
     # that their names are unique.
+    docs = []
     name_counts = Counter[str]()
     for jaxpr, c in jaxpr_counts.items():
       if c == 1:
@@ -3260,6 +3257,7 @@ custom_str_eqn_compact_rules: dict[
 
 def pp_jaxpr_skeleton(jaxpr: Jaxpr, eqns_fn, context: JaxprPpContext,
                       settings: JaxprPpSettings) -> pp.Doc:
+  module = pp.concat([pp_jaxpr_function(k, v, context, settings) for k, v in jaxpr.module.items()])
   constvars = pp_vars(jaxpr.constvars, context, print_shapes=settings.print_shapes)
   invars = pp_vars(jaxpr.invars, context, print_shapes=settings.print_shapes)
   eqns = eqns_fn()
@@ -3283,7 +3281,7 @@ def pp_jaxpr_skeleton(jaxpr: Jaxpr, eqns_fn, context: JaxprPpContext,
   else:
     eff_text = []
   return pp.group(pp.nest(2, pp.concat([
-    pp.text("{ "), pp.keyword(pp.text("lambda ")),
+    module, pp.text("{ "), pp.keyword(pp.text("lambda ")),
     constvars, pp.text("; "), invars,
     pp.text(". "), pp.keyword(pp.text("let")),
     pp.nest(2, pp.brk() + eqns), pp.brk(),
