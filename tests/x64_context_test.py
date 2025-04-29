@@ -139,5 +139,11 @@ class X64ContextTests(jtu.JaxTestCase):
     z = jax.jit(lambda x: x.astype(jnp.int32))(x)
     self.assertEqual(z.dtype, jnp.int32)
 
+  def test_cotangent_type(self):
+    def f(x, y):
+      with enable_x64():
+        return x + y
+    jax.grad(f, argnums=(0, 1))(1.0, 0.5)  # doesn't crash
+
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

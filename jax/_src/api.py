@@ -511,7 +511,11 @@ def value_and_grad(fun: Callable, argnums: int | Sequence[int] = 0,
           f_partial, *dyn_args, has_aux=True)
     _check_scalar(ans)
     tree_map(partial(_check_output_dtype_grad, holomorphic), ans)
-    g = vjp_py(lax_internal._one(ans))
+    dtype = dtypes.dtype(ans, canonicalize=False)
+    weak_type = dtypes.is_weakly_typed(ans)
+    ct = lax_internal._convert_element_type(
+        1.0, dtype, weak_type, canonicalize_dtype=False)
+    g = vjp_py(ct)
     g = g[0] if isinstance(argnums, int) else g
     if not has_aux:
       return ans, g
