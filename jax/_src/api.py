@@ -59,6 +59,7 @@ from jax._src import traceback_util
 from jax._src import pjit
 from jax._src import xla_bridge as xb
 from jax._src.core import eval_jaxpr, shaped_abstractify, ShapedArray
+from jax._src.abstract_arrays import numpy_scalar_types
 from jax._src.api_util import (
   flatten_fun, flatten_fun_nokwargs, flatten_fun_nokwargs2, argnums_partial,
   flatten_axes, donation_vector,
@@ -511,10 +512,9 @@ def value_and_grad(fun: Callable, argnums: int | Sequence[int] = 0,
           f_partial, *dyn_args, has_aux=True)
     _check_scalar(ans)
     tree_map(partial(_check_output_dtype_grad, holomorphic), ans)
-    dtype = dtypes.dtype(ans, canonicalize=False)
-    weak_type = dtypes.is_weakly_typed(ans)
-    ct = lax_internal._convert_element_type(
-        1.0, dtype, weak_type, canonicalize_dtype=False)
+    ct = _tangent_one_like(ans)
+    print(type(ans), ans, type(ct), ct, ans.dtype, ct.dtype)
+    assert 0
     g = vjp_py(ct)
     g = g[0] if isinstance(argnums, int) else g
     if not has_aux:
@@ -523,6 +523,21 @@ def value_and_grad(fun: Callable, argnums: int | Sequence[int] = 0,
       return (ans, aux), g
 
   return value_and_grad_f
+
+pytype_one_rules: dict[type, Callable[[Any], Any]] = {}
+pytype_one_rules[float] = lambda _: 1.0
+pytype_one_rules[np.ndarray] = np.ones_like
+for t in numpy_scalar_types:
+  pytype_one_rules[t] = np.ones_like
+
+def _tangent_one_like(x):
+  typ = type(x)
+  if (one_fn := pytype_one_rules.get(typ)):
+    return one_fn(x)
+  for t in typ.__mro__[1:]:
+    if (one_fn := pytype_one_rules.get(t)):
+      return one_fn(x)
+  return lax_internal._one(x)
 
 def _check_scalar(x):
   msg = "Gradient only defined for scalar-output functions. Output {}.".format

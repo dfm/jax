@@ -1658,8 +1658,7 @@ def _convert_element_type(
     new_dtype: DTypeLike | dtypes.ExtendedDType | None = None,
     weak_type: bool = False,
     sharding: Sharding | None = None,
-    warn_on_complex_to_real_cast: bool = True,
-    canonicalize_dtype: bool = True):
+    warn_on_complex_to_real_cast: bool = True):
   if hasattr(operand, '__jax_array__'):
     operand = operand.__jax_array__()
 
@@ -1698,7 +1697,7 @@ def _convert_element_type(
     new_dtype = old_dtype
   else:
     new_dtype = np.dtype(new_dtype)
-  new_dtype = dtypes.dtype(new_dtype, canonicalize=canonicalize_dtype)
+  new_dtype = dtypes.dtype(new_dtype, canonicalize=True)
 
   if sharding is not None and not isinstance(sharding, Sharding):
     raise ValueError(f'{sharding=} must be an instance of jax.sharding.Sharding')
