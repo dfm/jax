@@ -177,6 +177,20 @@ class PythonCallbackTest(jtu.JaxTestCase):
     self.assertAllClose(_received, x)
 
   @with_pure_and_io_callbacks
+  def test_callback_with_prng_key(self, *, callback):
+    def body(x):
+      self.assertEqual(x, key)
+      return x
+
+    @jax.jit
+    def f(x):
+      return callback(body, x, x)
+
+    key = jax.random.key(0)
+    out = f(key)
+    self.assertEqual(out, key)
+
+  @with_pure_and_io_callbacks
   def test_callback_with_wrong_number_of_args(self, *, callback):
 
     @jax.jit

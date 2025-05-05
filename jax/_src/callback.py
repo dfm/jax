@@ -21,6 +21,7 @@ import logging
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 from jax._src import config
 from jax._src import core
 from jax._src import dispatch
@@ -28,6 +29,7 @@ from jax._src import dtypes
 from jax._src import effects
 from jax._src import ffi
 from jax._src import pickle_util
+from jax._src import prng
 from jax._src import sharding_impls
 from jax._src import tree_util
 from jax._src import util
@@ -66,10 +68,21 @@ class _FlatCallback:
   """
   callback_func: Callable[..., Any]
   in_tree: tree_util.PyTreeDef  # (args, kwargs) pytree for `callback_func`.
+  in_avals: tuple[core.AbstractValue, ...]
 
   def __call__(self, *flat_args: jax.Array) -> Sequence[jax.Array]:
+    flat_args = [x if (impl := _get_prng_impl(aval)) is None
+                 else prng.random_wrap(x, impl=impl)
+                 for x, aval in zip(flat_args, self.in_avals)]
     args, kwargs = tree_util.tree_unflatten(self.in_tree, flat_args)
-    return tree_util.tree_leaves(self.callback_func(*args, **kwargs))
+    flat_out = tree_util.tree_leaves(self.callback_func(*args, **kwargs))
+    return [x if _get_prng_impl(core.get_aval(x)) is None
+            else prng.random_unwrap(x) for x in flat_out]
+
+def _get_prng_impl(aval: core.AbstractValue) -> prng.PRNGImpl | None:
+  if not (hasattr(aval, "dtype") and jnp.issubdtype(aval.dtype, dtypes.prng_key)):
+    return None
+  return aval.dtype._impl
 
 
 def pure_callback_impl(
@@ -244,11 +257,12 @@ def pure_callback_lowering(
 mlir.register_lowering(pure_callback_p, pure_callback_lowering)
 
 def _check_shape_dtype(shape_dtype):
-  dt = np.dtype(shape_dtype.dtype)
+  if jnp.issubdtype(shape_dtype.dtype, dtypes.prng_key):
+    return
+  dt = dtypes.dtype(shape_dtype.dtype)
   if dtypes.canonicalize_dtype(dt) != dt:
     raise ValueError(
         "result_shape_dtypes cannot specify 64-bit types when `jax_enable_x64` is disabled")
-
 
 def pure_callback(
     callback: Callable[..., Any],
@@ -377,13 +391,14 @@ def pure_callback(
         f"but got: {vmap_method}")
 
   flat_args, in_tree = tree_util.tree_flatten((args, kwargs))
+  in_avals = tuple(core.get_aval(x) for x in flat_args)
   tree_util.tree_map(_check_shape_dtype, result_shape_dtypes)
   result_avals = tree_util.tree_map(
       lambda x: core.ShapedArray(x.shape, x.dtype), result_shape_dtypes)
   flat_result_avals, out_tree = tree_util.tree_flatten(result_avals)
   out_flat = pure_callback_p.bind(
       *flat_args,
-      callback=_FlatCallback(callback, in_tree),
+      callback=_FlatCallback(callback, in_tree, in_avals),
       result_avals=tuple(flat_result_avals),
       sharding=sharding,
       vmap_method=vmap_method,
