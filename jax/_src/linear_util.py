@@ -494,22 +494,28 @@ def hashable_partial(f, *args):
   return f(*args)
 
 
-def merge_linear_aux(aux1, aux2):
-  try:
-    out1 = aux1()
-  except StoreException:
-    # store 1 was not occupied, so store 2 better be
+def merge_linear_aux(*aux):
+  assert len(aux) >= 2
+  for i, a in enumerate(aux):
+    if a is None:
+      continue
     try:
-      out2 = aux2()
+      out = a()
     except StoreException:
-      raise StoreException("neither store occupied") from None
+      pass
     else:
-      return False, out2
-  else:
-    # store 1 was occupied, so let's check store 2 is not occupied
-    try:
-      out2 = aux2()
-    except StoreException:
-      return True, out1
-    else:
-      raise StoreException("both stores occupied")
+      for b in aux[i + 1:]:
+        if b is None:
+          continue
+        try:
+          b()
+        except StoreException:
+          pass
+        else:
+          raise StoreException(
+              "both stores occupied" if len(aux) == 2 else
+              "multiple stores occupied")
+      return i, out
+  raise StoreException(
+      "neither store occupied" if len(aux) == 2 else
+      "none of the stores are occupied")

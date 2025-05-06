@@ -474,6 +474,116 @@ class JaxprTrace(Trace['JaxprTracer']):
     for t in out_tracers: t.recipe = eqn
     return out_tracers
 
+  def process_custom_ad_call(self, prim, fun, jvp, fwd, bwd, tracers,
+                             symbolic_zeros, out_trees):
+    tracers = map(self.to_jaxpr_tracer, tracers)
+    if all(t.is_known() for t in tracers):
+      with core.set_current_trace(self.parent_trace):
+        vals = [t.pval[1] for t in tracers]
+        return prim.bind(
+            fun, jvp, fwd, bwd, *vals, symbolic_zeros=symbolic_zeros,
+            out_trees=out_trees)
+
+    if fwd is None:
+      # We assume non-trivial partial evaluation is only performed to build
+      # linear functions, and hence we don't need to keep the custom JVP rule
+      # around.
+      del jvp, symbolic_zeros
+      with core.set_current_trace(self):
+        return fun.call_wrapped(*tracers)
+
+    tracers = map(self.instantiate_const, tracers)
+    in_knowns = (False,) * len(tracers)
+    in_avals = tuple(t.aval for t in tracers)
+    f_ = trace_to_subjaxpr_nounits2(fun, self.tag, fun.debug_info, True)
+    f_, aux = partial_eval_wrapper_nounits(f_, in_knowns, in_avals)
+    params = dict(out_trees=out_trees, symbolic_zeros=symbolic_zeros)
+    res = prim.bind_with_trace(self.parent_trace, (f_, jvp, fwd, bwd), params)
+    out_knowns, out_avals, jaxpr, env = aux()
+    assert not any(out_knowns)
+    res_tracers = map(self.instantiate_const, map(self.new_const, res))
+    env_tracers = map(self.to_jaxpr_tracer, env)
+    out_tracers = [JaxprTracer(self, PartialVal.unknown(a), None)
+                  for a in out_avals]
+    closed_jaxpr = close_jaxpr(convert_constvars_jaxpr(jaxpr))
+
+    if jvp is not None:
+      @partial(lu.wrap_init, debug_info=jvp.debug_info)
+      @_memoize
+      def jvp_jaxpr_thunk(*in_zeros):
+        in_tangent_avals = [v.to_tangent_aval() for v in in_avals]
+        nz_tangent_avals, zero_avals = partition_list(in_zeros, in_tangent_avals)
+        jvp_, out_zeros = _jvp_jaxpr_zeros(jvp, in_zeros, tuple(zero_avals))
+        in_avals_ = (*in_avals, *nz_tangent_avals)
+        jaxpr, _, out_consts, () = trace_to_jaxpr_dynamic(jvp_, in_avals_)
+        return jaxpr, out_consts, out_zeros()
+    else:
+      jvp_jaxpr_thunk = None
+
+    if fwd is not None:
+      @partial(lu.wrap_init, debug_info=fwd.debug_info)
+      @_memoize
+      def fwd_jaxpr_thunk(*zeros):
+        fwd_ = _interleave_fun(fwd, zeros)
+        fwd_jaxpr, _, consts, () = trace_to_jaxpr_dynamic(fwd_, in_avals)
+        return fwd_jaxpr, consts
+    else:
+      fwd_jaxpr_thunk = None
+
+    name_stack = self._current_truncated_name_stack()
+    source = source_info_util.current().replace(name_stack=name_stack)
+    params = dict(
+        call_jaxpr=closed_jaxpr,
+        jvp_jaxpr_thunk=jvp_jaxpr_thunk,
+        fwd_jaxpr_thunk=fwd_jaxpr_thunk,
+        num_consts=len(res) + len(env),
+        bwd=bwd,
+        out_trees=out_trees,
+        symbolic_zeros=symbolic_zeros
+    )
+    eqn = new_eqn_recipe((*res_tracers, *env_tracers, *tracers),
+                          out_tracers, prim, params, jaxpr.effects, source)
+    for t in out_tracers: t.recipe = eqn
+    return out_tracers
+
+  def process_jvp_of_custom_ad_call(self, prim, fun, jvp, fwd, bwd, tracers, *,
+                                    symbolic_zeros: bool, out_trees: Any,
+                                    in_zeros: tuple[bool, ...]):
+    tracers = map(self.to_jaxpr_tracer, tracers)
+    primal_tracers, nz_tangent_tracers = split_list(tracers, [len(in_zeros)])
+
+    if all(t.is_known() for t in (*primal_tracers, *nz_tangent_tracers)):
+      with core.set_current_trace(self.parent_trace):
+        vals = [t.pval[1] for t in (*primal_tracers, *nz_tangent_tracers)]
+        return prim.bind(
+            fun, jvp, fwd, bwd, *vals, symbolic_zeros, out_trees=out_trees,
+            in_zeros=in_zeros)
+
+    assert all(p.is_known() for p in primal_tracers)
+    primal_tracers = [p.pval[1] for p in primal_tracers]
+    fwd_args = [x for v, z in zip(primal_tracers, in_zeros) for x in (v, not z)]
+    with core.set_current_trace(self.parent_trace):
+      res_and_primals_out = fwd.call_wrapped(*fwd_args)
+    _, res_tree = out_trees()
+    res, primals_out = split_list(res_and_primals_out, [res_tree.num_leaves])
+
+    in_tracers = map(self.instantiate_const, nz_tangent_tracers)
+    out_avals = [core.get_aval(x).to_tangent_aval() for x in primals_out]
+    out_tracers = [JaxprTracer(self, PartialVal.unknown(a), None)
+                   for a in out_avals]
+    res_tracers = map(self.instantiate_const, map(self.new_const, res))
+    params = dict(
+        num_res=res_tree.num_leaves, bwd=bwd, out_avals=out_avals,
+        in_zeros=in_zeros, symbolic_zeros=symbolic_zeros)
+    name_stack = self._current_truncated_name_stack()
+    source = source_info_util.current().replace(name_stack=name_stack)
+    from jax._src.interpreters import ad
+    eqn = new_eqn_recipe((*res_tracers, *in_tracers), out_tracers,
+                         ad.custom_lin_p, params, core.no_effects, source)
+    for t in out_tracers: t.recipe = eqn
+    return (*primals_out, *out_tracers)
+
+
 def partition_pvals(
     pvals: list[PartialVal]
   ) -> tuple[list[bool], list[AbstractValue], list[Any]]:
@@ -2145,6 +2255,117 @@ class DynamicJaxprTrace(core.Trace):
                              lin_tree=lin_tree, out_tree=out_tree),
                         closed_call_jaxpr.effects,
                         source_info)
+    self.frame.add_eqn(eqn)
+    return out_tracers
+
+  def process_custom_ad_call(self, prim, fun: lu.WrappedFun,
+                              jvp: lu.WrappedFun, fwd: lu.WrappedFun,
+                              bwd: lu.WrappedFun, tracers,
+                              symbolic_zeros: bool, out_trees: Any):
+    source_info = source_info_util.current()
+    to_jaxpr_tracer = partial(self.to_jaxpr_tracer, source_info=source_info)
+    tracers = map(to_jaxpr_tracer, tracers)
+    in_avals = [t.aval for t in tracers]
+    in_tangent_avals = [t.to_tangent_aval() for t in in_avals]
+    fun_jaxpr, out_avals, consts, () = trace_to_jaxpr_dynamic(fun, in_avals)
+    closed_fun_jaxpr = core.ClosedJaxpr(convert_constvars_jaxpr(fun_jaxpr), ())
+
+    if jvp is not None:
+      @partial(lu.wrap_init, debug_info=jvp.debug_info)
+      @_memoize
+      def jvp_jaxpr_thunk(*in_zeros):
+        for store in jvp.stores: store and store.reset()
+        nz_tangent_avals, zero_avals = partition_list(in_zeros, in_tangent_avals)
+        jvp_, out_zeros = _jvp_jaxpr_zeros(jvp, in_zeros, tuple(zero_avals))
+        in_avals_ = (*in_avals, *nz_tangent_avals)
+        jaxpr, _, out_consts, () = trace_to_jaxpr_dynamic(jvp_, in_avals_)
+        return jaxpr, out_consts, out_zeros()
+    else:
+      jvp_jaxpr_thunk = None
+
+    if fwd is not None:
+      @partial(lu.wrap_init, debug_info=fwd.debug_info)
+      @_memoize
+      def fwd_jaxpr_thunk(*in_zeros):
+        for store in fwd.stores: store and store.reset()
+        fwd_ = _interleave_fun(fwd, in_zeros)
+        jaxpr, _, consts, () = trace_to_jaxpr_dynamic(fwd_, in_avals)
+        return jaxpr, consts
+    else:
+      fwd_jaxpr_thunk = None
+
+    out_tracers = [DynamicJaxprTracer(self, a) for a in out_avals]
+    invars = map(self.getvar, tracers)
+    constvars = map(self.getvar, map(to_jaxpr_tracer, consts))
+    outvars = map(self.makevar, out_tracers)
+    new_params = dict(
+        call_jaxpr=closed_fun_jaxpr,
+        num_consts=len(consts),
+        jvp_jaxpr_thunk=jvp_jaxpr_thunk,
+        fwd_jaxpr_thunk=fwd_jaxpr_thunk,
+        bwd=bwd,
+        symbolic_zeros=symbolic_zeros,
+        out_trees=out_trees,
+    )
+    eqn = new_jaxpr_eqn([*constvars, *invars], outvars, prim, new_params,
+                        fun_jaxpr.effects, source_info)
+    self.frame.add_eqn(eqn)
+    return out_tracers
+
+  def process_jvp_of_custom_ad_call(
+      self, prim, fun: lu.WrappedFun, jvp: lu.WrappedFun, fwd: lu.WrappedFun,
+      bwd: lu.WrappedFun, tracers,  symbolic_zeros: bool, out_trees: Any,
+      in_zeros: tuple[bool, ...]):
+    source_info = source_info_util.current()
+    to_jaxpr_tracer = partial(self.to_jaxpr_tracer, source_info=source_info)
+    tracers = map(to_jaxpr_tracer, tracers)
+    primals_in, nz_tangents_in = split_list(tracers, [len(in_zeros)])
+    in_avals = [t.aval for t in primals_in]
+    nz_tangent_avals = [t.aval for t in nz_tangents_in]
+    zero_avals = [v.to_tangent_aval() for z, v in zip(in_zeros, in_avals) if z]
+    fun_jaxpr, out_avals, consts, () = trace_to_jaxpr_dynamic(fun, in_avals)
+    closed_fun_jaxpr = core.ClosedJaxpr(convert_constvars_jaxpr(fun_jaxpr), ())
+
+    if jvp is not None:
+      @partial(lu.wrap_init, debug_info=jvp.debug_info)
+      @_memoize
+      def jvp_jaxpr_thunk():
+        for store in jvp.stores: store and store.reset()
+        jvp_, out_zeros = _jvp_jaxpr_zeros(jvp, in_zeros, tuple(zero_avals))
+        in_avals_ = (*in_avals, *nz_tangent_avals)
+        jaxpr, _, out_consts, () = trace_to_jaxpr_dynamic(jvp_, in_avals_)
+        return jaxpr, out_consts, out_zeros()
+    else:
+      jvp_jaxpr_thunk = None
+
+    if fwd is not None:
+      @partial(lu.wrap_init, debug_info=fwd.debug_info)
+      @_memoize
+      def fwd_jaxpr_thunk():
+        for store in fwd.stores: store and store.reset()
+        fwd_ = _interleave_fun(fwd, in_zeros)
+        jaxpr, _, consts, () = trace_to_jaxpr_dynamic(fwd_, in_avals)
+        return jaxpr, consts
+    else:
+      fwd_jaxpr_thunk = None
+
+    out_tracers = [DynamicJaxprTracer(self, a) for a in out_avals]
+    out_tracers += [DynamicJaxprTracer(self, a.to_tangent_aval()) for a in out_avals]
+    invars = map(self.getvar, tracers)
+    constvars = map(self.getvar, map(to_jaxpr_tracer, consts))
+    outvars = map(self.makevar, out_tracers)
+    new_params = dict(
+        call_jaxpr=closed_fun_jaxpr,
+        num_consts=len(consts),
+        jvp_jaxpr_thunk=jvp_jaxpr_thunk,
+        fwd_jaxpr_thunk=fwd_jaxpr_thunk,
+        bwd=bwd,
+        symbolic_zeros=symbolic_zeros,
+        out_trees=out_trees,
+        in_zeros=in_zeros,
+    )
+    eqn = new_jaxpr_eqn([*constvars, *invars], outvars, prim, new_params,
+                        fun_jaxpr.effects, source_info)
     self.frame.add_eqn(eqn)
     return out_tracers
 

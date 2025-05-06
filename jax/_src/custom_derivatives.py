@@ -95,7 +95,7 @@ def _flatten_fun_nokwargs(f: Callable,
 ReturnValue = TypeVar('ReturnValue')
 
 @custom_api_util.register_custom_decorator_type
-class custom_jvp(Generic[ReturnValue]):
+class custom_jvp_(Generic[ReturnValue]):
   """Set up a JAX-transformable function for a custom JVP rule definition.
 
   This class is meant to be used as a function decorator. Instances are
@@ -503,7 +503,7 @@ core.pp_eqn_rules[custom_jvp_call_p] = _custom_jvp_call_pp_rule
 ### VJPs
 
 @custom_api_util.register_custom_decorator_type
-class custom_vjp(Generic[ReturnValue]):
+class custom_vjp_(Generic[ReturnValue]):
   """Set up a JAX-transformable function for a custom VJP rule definition.
 
   This class is meant to be used as a function decorator. Instances are
@@ -1800,3 +1800,403 @@ batching.fancy_primitive_batchers[remat_opt_p] = _remat_opt_vmap
 ad.primitive_jvps[remat_opt_p] = _remat_opt_jvp
 ad.primitive_transposes[remat_opt_p] = _remat_opt_transpose
 pe.dce_rules[remat_opt_p] = _remat_opt_dce
+
+# Custom AD
+
+@custom_api_util.register_custom_decorator_type
+class custom_ad(Generic[ReturnValue]):
+  fun: Callable[..., ReturnValue]
+  nondiff_argnums: Sequence[int]
+  symbolic_zeros: bool
+  optimize_remat: bool
+  jvp: Callable[..., tuple[ReturnValue, ReturnValue]] | None = None
+  fwd: Callable[..., tuple[ReturnValue, Any]] | None = None
+  bwd: Callable[..., tuple[Any, ...]] | None = None
+
+  def __init__(
+      self, fun: Callable[..., ReturnValue], nondiff_argnums: Sequence[int] = ()
+  ):
+    update_wrapper(self, fun)
+    self.fun = fun
+    self.nondiff_argnums = nondiff_argnums
+    self.jvp = None
+    self.fwd = None
+    self.bwd = None
+    self.symbolic_zeros = False
+    self.optimize_remat = False
+
+  __getattr__ = custom_api_util.forward_attr
+
+  def defjvp(
+      self,
+      jvp: Callable[..., tuple[ReturnValue, ReturnValue]],
+      symbolic_zeros: bool = False,
+  ) -> Callable[..., tuple[ReturnValue, ReturnValue]]:
+    self.jvp = jvp
+    self.symbolic_zeros = symbolic_zeros
+    return jvp
+
+  def defjvps(self, *jvps: Callable[..., ReturnValue] | None) -> None:
+    if self.nondiff_argnums:
+      raise TypeError("Can't use ``defjvps`` with ``nondiff_argnums``.")
+
+    def jvp(primals, tangents):
+      primal_out = self(*primals)
+      zeros = _zeros_like_pytree(primal_out)
+      all_tangents_out = [jvp(t, primal_out, *primals) if jvp else zeros
+                          for t, jvp in zip(tangents, jvps)]
+      tangent_out = tree_map(_sum_tangents, primal_out, *all_tangents_out)
+      return primal_out, tangent_out
+
+    self.defjvp(jvp)
+
+  def defvjp(
+      self,
+      fwd: Callable[..., tuple[ReturnValue, Any]],
+      bwd: Callable[..., tuple[Any, ...]],
+      symbolic_zeros: bool = False,
+      optimize_remat: bool = False,
+  ) -> None:
+    self.fwd = fwd
+    self.bwd = bwd
+    self.symbolic_zeros = symbolic_zeros
+    self.optimize_remat = optimize_remat
+    if self.symbolic_zeros and self.optimize_remat:
+      raise NotImplementedError(
+          "remat optimization for custom_ad does not support symbolic zeros")
+
+  @traceback_util.api_boundary
+  def __call__(self, *args: Any, **kwargs: Any) -> ReturnValue:  # pytype: disable=invalid-annotation
+    debug = debug_info("custom_ad fun", self.fun, args, kwargs,
+                       static_argnums=self.nondiff_argnums)
+    primal_name = debug.func_name
+
+    if self.jvp is None and self.fwd is None:
+      raise ValueError(
+          "Differentation rules not specified for custom_ad-decorated function "
+          f"{primal_name}. Custom differentation rules must be defined using "
+          "'defjvp', 'defvjp', or both."
+      )
+    if (self.fwd is None) ^ (self.bwd is None):
+      raise ValueError(
+          f"For custom_ad-decorated function {primal_name}, the fwd and bwd "
+          "functions must both be specified or not."
+      )
+
+    try:
+      args = resolve_kwargs(self.fun, args, kwargs)
+    except TypeError as e:
+      raise TypeError(
+          "The input arguments to the custom_ad-decorated function "
+          f"{primal_name} could not be resolved to positional-only "
+          f"arguments. Binding failed with the error:\n{e}"
+      ) from e
+
+    debug_fwd = debug_info("custom_ad fwd", self.fwd, args, kwargs,
+                          static_argnums=self.nondiff_argnums)
+    # TODO(necula): figure out how to construct the debug_bwd args
+    debug_bwd = debug_info("custom_ad bwd", self.bwd, args, {})
+
+    if self.optimize_remat and self.fwd is not None:
+      fwd = optimize_remat_of_custom_vjp_fwd(
+          self.fun, debug, self.fwd, debug_fwd,
+          nondiff_argnums=self.nondiff_argnums,
+          symbolic_zeros=self.symbolic_zeros)
+    else:
+      fwd = self.fwd
+
+    if self.nondiff_argnums:
+      if self.jvp is None:
+        for i in self.nondiff_argnums: _check_for_tracers(args[i])
+      nondiff_argnums = set(self.nondiff_argnums)
+      args = tuple(_stop_gradient(x) if i in nondiff_argnums else x
+                   for i, x in enumerate(args))
+      dyn_argnums = [i for i in range(len(args)) if i not in nondiff_argnums]
+      f_, dyn_args = argnums_partial(
+          lu.wrap_init(self.fun, debug_info=debug), dyn_argnums, args, False)
+      static_args = [args[i] for i in sorted(nondiff_argnums)]
+
+      debug_jvp = debug_info(
+          "custom_ad jvp", self.jvp, (*static_args, dyn_args, dyn_args), {},
+          static_argnums=tuple(range(len(static_args))))
+      jvp = self.jvp and prepend_static_args(
+          lu.wrap_init(self.jvp, debug_info=debug_jvp), static_args)
+
+      fwd_ = fwd and argnums_partial(
+          lu.wrap_init(fwd, debug_info=debug_fwd), dyn_argnums, args, False)[0]
+      bwd = self.bwd and prepend_static_args(
+          lu.wrap_init(self.bwd, debug_info=debug_bwd), static_args)
+    else:
+      f_, dyn_args = lu.wrap_init(self.fun, debug_info=debug), args
+      debug_jvp = debug_info("custom_jvp jvp", self.jvp, (args, args), {})
+      jvp = self.jvp and lu.wrap_init(self.jvp, debug_info=debug_jvp)
+      fwd_ = fwd and lu.wrap_init(fwd, debug_info=debug_fwd)
+      bwd = self.bwd and lu.wrap_init(self.bwd, debug_info=debug_bwd)
+
+    args_flat, in_tree = tree_flatten(dyn_args)
+    if config.mutable_array_checks.value:
+      f_ = _check_primal_refs(f_, self.nondiff_argnums, f_.debug_info)
+    flat_fun, out_type1 = _flatten_fun_nokwargs(f_, in_tree)
+    out_types = []
+    if jvp is None:
+      flat_jvp = None
+    else:
+      flat_jvp, out_type2 = _flatten_jvp(
+          jvp, primal_name, debug_jvp.func_name, in_tree, out_type1)
+      out_types.append(out_type2)
+    if fwd_ is None:
+      flat_fwd = None
+      flat_bwd = None
+      out_trees = None
+    else:
+      flat_fwd, out_trees = _flatten_fwd(
+          fwd_, self.nondiff_argnums, self.symbolic_zeros, debug,
+          debug_fwd, in_tree, out_type1)
+      in_avals = [core.get_aval(x) for x in args_flat]
+      flat_bwd = _flatten_bwd(bwd, in_tree, in_avals, out_trees)
+      out_types.append(out_trees)
+    out_flat = custom_ad_call_p.bind(
+        flat_fun, flat_jvp, flat_fwd, flat_bwd, *args_flat, out_trees=out_trees,
+        symbolic_zeros=self.symbolic_zeros)
+    _, (out_tree, _) = lu.merge_linear_aux(out_type1, *out_types)
+    return tree_unflatten(out_tree, out_flat)
+
+
+class CustomADCallPrimitive(core.Primitive):
+  multiple_results = True
+  jvp_of: core.Primitive
+
+  def bind(self, *args, **params):
+    return self._true_bind(*args, **params)
+
+  def bind_with_trace(self, trace, args, params):
+    fun, jvp, fwd, bwd, *tracers = args
+    return trace.process_custom_ad_call(self, fun, jvp, fwd, bwd, tracers, **params)
+
+  def impl(self, *args):
+    raise NotImplementedError
+
+  def get_bind_params(self, params):
+    new_params = dict(params)
+    num_consts: int = new_params.pop("num_consts")
+
+    call_jaxpr: core.ClosedJaxpr = new_params.pop("call_jaxpr")
+    fun = lu.wrap_init(core.jaxpr_as_fun(call_jaxpr),
+                       debug_info=call_jaxpr.jaxpr.debug_info)
+
+    jvp_jaxpr_thunk = new_params.pop("jvp_jaxpr_thunk")
+    if jvp_jaxpr_thunk is not None:
+      jvp = lift_jvp(num_consts, jvp_jaxpr_thunk)
+    else:
+      jvp = None
+
+    fwd_jaxpr_thunk = new_params.pop("fwd_jaxpr_thunk")
+    if fwd_jaxpr_thunk is not None:
+      fwd = lift_fwd(num_consts, fwd_jaxpr_thunk)
+    else:
+      fwd = None
+
+    bwd = new_params.pop("bwd")
+    if bwd is not None:
+      const_avals, _ = split_list(call_jaxpr.in_avals, [num_consts])
+      bwd = _handle_consts_in_bwd(bwd, const_avals)
+
+    return [fun, jvp, fwd, bwd], new_params
+
+custom_ad_call_p = CustomADCallPrimitive("custom_ad_call")
+mlir.register_lowering(custom_ad_call_p, _custom_jvp_vjp_call_lowering)
+
+def _custom_ad_call_typecheck(_, *in_avals, call_jaxpr, **kwargs):
+  del in_avals, kwargs
+  disallowed_effects = effects.custom_derivatives_allowed_effects.filter_not_in(
+      call_jaxpr.effects)
+  if disallowed_effects:
+    raise NotImplementedError(
+        f'Effects not supported in `custom_ad`: {disallowed_effects}')
+  return call_jaxpr.out_avals, call_jaxpr.effects
+core.custom_typechecks[custom_ad_call_p] = _custom_ad_call_typecheck
+
+def _custom_ad_call_dce(
+    used_outs: Sequence[bool], eqn: core.JaxprEqn
+) -> tuple[list[bool], core.JaxprEqn | None]:
+  if not any(used_outs) and not pe.has_effects(eqn):
+    return [False] * len(eqn.invars), None
+
+  call_jaxpr = eqn.params["call_jaxpr"]
+  symbolic_zeros = eqn.params["symbolic_zeros"]
+  out_trees = eqn.params["out_trees"]
+
+  # We must set instantiate=True because some inputs that are unused by the
+  # DCE'ed primal might be used in the rules.
+  dce_call_jaxpr, used_ins = _cached_closed_call_dce_instantiate(
+      call_jaxpr, tuple(used_outs))
+  assert all(used_ins)
+
+  jvp_jaxpr_thunk = eqn.params["jvp_jaxpr_thunk"]
+  if jvp_jaxpr_thunk is not None:
+    @partial(lu.wrap_init, debug_info=jvp_jaxpr_thunk.debug_info)
+    @pe._memoize
+    def dce_jvp_jaxpr_thunk(*in_zeros):
+      jvp_jaxpr, consts, out_zeros = jvp_jaxpr_thunk.call_wrapped(*in_zeros)
+      dce_jvp_jaxpr, _ = pe.dce_jaxpr(jvp_jaxpr, [*used_outs, *used_outs], True)
+      dce_out_zeros = [v for used, v in zip(used_outs, out_zeros) if used]
+      return dce_jvp_jaxpr, consts, dce_out_zeros
+  else:
+    dce_jvp_jaxpr_thunk = None
+
+  fwd_jaxpr_thunk = eqn.params["fwd_jaxpr_thunk"]
+  bwd = eqn.params["bwd"]
+  if fwd_jaxpr_thunk is not None:
+    @partial(lu.wrap_init, debug_info=fwd_jaxpr_thunk.debug_info)
+    @pe._memoize
+    def dce_fwd_jaxpr_thunk(*zeros):
+      fwd_jaxpr = core.ClosedJaxpr(*fwd_jaxpr_thunk.call_wrapped(*zeros))
+      _, res_tree = out_trees()
+      num_res = res_tree.num_leaves
+      dce_fwd_jaxpr, _ = _cached_closed_call_dce_instantiate(
+          fwd_jaxpr, (True,) * num_res + tuple(used_outs))
+      return dce_fwd_jaxpr.jaxpr, dce_fwd_jaxpr.consts
+
+    @partial(lu.wrap_init, debug_info=bwd.debug_info)
+    def dce_bwd(*args):
+      _, res_tree = out_trees()
+      res, cts = split_list(args, [res_tree.num_leaves])
+      cts_ = iter(cts)
+      all_cts = []
+      for used, aval in zip(used_outs, call_jaxpr.out_avals):
+        if used:
+          all_cts.append(next(cts_))
+        else:
+          ct_aval = aval.to_tangent_aval()
+          if symbolic_zeros:
+            all_cts.append(SymbolicZero(ct_aval))
+          else:
+            all_cts.append(zeros_like_aval(ct_aval))
+      assert next(cts_, None) is None
+      return bwd.call_wrapped(*res, *all_cts)
+  else:
+    dce_fwd_jaxpr_thunk = None
+    dce_bwd = None
+
+  outvars = [v for used, v in zip(used_outs, eqn.outvars) if used]
+  new_params = dict(
+      eqn.params,
+      call_jaxpr=dce_call_jaxpr,
+      jvp_jaxpr_thunk=dce_jvp_jaxpr_thunk,
+      fwd_jaxpr_thunk=dce_fwd_jaxpr_thunk,
+      bwd=dce_bwd,
+  )
+  new_eqn = pe.new_jaxpr_eqn(
+      eqn.invars, outvars, eqn.primitive, new_params, dce_call_jaxpr.effects,
+      eqn.source_info, eqn.ctx)
+  return used_ins, new_eqn
+pe.dce_rules[custom_ad_call_p] = _custom_ad_call_dce
+
+
+class JvpOfCustomADCallPrimitive(CustomADCallPrimitive):
+  def bind_with_trace(self, trace, args, params):
+    fun, jvp, fwd, bwd, *tracers = args
+    return trace.process_jvp_of_custom_ad_call(
+        self, fun, jvp, fwd, bwd, tracers, **params)
+
+  def get_bind_params(self, params):
+    new_params = dict(params)
+    num_consts: int = new_params.pop("num_consts")
+    in_zeros = new_params["in_zeros"]
+    call_jaxpr: core.ClosedJaxpr = new_params.pop("call_jaxpr")
+    fun = lu.wrap_init(core.jaxpr_as_fun(call_jaxpr),
+                       debug_info=call_jaxpr.jaxpr.debug_info)
+    jvp = lift_jvp_no_zeros(len(in_zeros), num_consts,
+                            new_params.pop("jvp_jaxpr_thunk"))
+    fwd = lift_fwd_no_zeros(in_zeros, num_consts,
+                            new_params.pop("fwd_jaxpr_thunk"))
+    const_avals, _ = split_list(call_jaxpr.in_avals, [num_consts])
+    bwd = _handle_consts_in_bwd(new_params.pop("bwd"), const_avals)
+    return [fun, jvp, fwd, bwd], new_params
+
+def lift_jvp_no_zeros(num_primals: int, num_consts: int,
+                      jvp_jaxpr_thunk: lu.WrappedFun | None) -> lu.WrappedFun | None:
+  if jvp_jaxpr_thunk is None: return None
+
+  def jvp(*xs):
+    n = num_consts + num_primals
+    primals, tangents = xs[num_consts:n], xs[n:]  # consts always have zero tangent
+    assert not any(type(t) is SymbolicZero for t in tangents)
+    jvp_jaxpr, jvp_consts, out_zeros = jvp_jaxpr_thunk.call_wrapped()
+    out = core.eval_jaxpr(jvp_jaxpr, jvp_consts, *primals, *tangents)
+    out_primals, nz_out_tangents = split_list(out, [len(out_zeros)])
+    nz_out_tangents_ = iter(nz_out_tangents)
+    out_tangents = [SymbolicZero(core.get_aval(p).to_tangent_aval())
+                    if z else next(nz_out_tangents_)
+                    for p, z in zip(out_primals, out_zeros)]
+    assert next(nz_out_tangents_, None) is None
+    return [*out_primals, *out_tangents]
+  return lu.wrap_init(jvp, debug_info=jvp_jaxpr_thunk.debug_info)
+
+def lift_fwd_no_zeros(expect_in_zeros: Sequence[bool], num_consts: int,
+                      fwd_jaxpr_thunk: lu.WrappedFun) -> lu.WrappedFun:
+  def fwd(*args):
+    vals, zeros = args[::2], args[1::2]
+    assert len(vals) == len(zeros)
+    _, primals = split_list(vals, [num_consts])
+    const_zeros, in_zeros = split_list(zeros, [num_consts])
+    if any(const_zeros):
+      raise ad.CustomVJPException()
+    assert all(a == b for a, b in zip(in_zeros, expect_in_zeros))
+    fwd_jaxpr, fwd_consts = fwd_jaxpr_thunk.call_wrapped()
+    return core.eval_jaxpr(fwd_jaxpr, fwd_consts, *primals)
+  return lu.wrap_init(fwd, debug_info=fwd_jaxpr_thunk.debug_info)
+
+jvp_of_custom_ad_call_p = JvpOfCustomADCallPrimitive("jvp_of_custom_ad_call")
+CustomADCallPrimitive.jvp_of = jvp_of_custom_ad_call_p
+
+def _jvp_of_custom_ad_call_typecheck(_, *in_avals, call_jaxpr, **kwargs):
+  del in_avals, kwargs
+  out_avals = call_jaxpr.out_avals
+  tangent_out_avals = [v.to_tangent_aval() for v in call_jaxpr.out_avals]
+  return [*out_avals, *tangent_out_avals], call_jaxpr.effects
+core.custom_typechecks[jvp_of_custom_ad_call_p] = _jvp_of_custom_ad_call_typecheck
+
+
+def _jvp_of_custom_ad_call_pe_jaxpr_custom_rule(
+    saveable: Callable, unks_in: Sequence[bool], inst_in: Sequence[bool],
+    eqn: core.JaxprEqn):
+  in_zeros = eqn.params["in_zeros"]
+  unk_primals_in, unk_tangents_in = split_list(unks_in, [len(in_zeros)])
+  assert not any(unk_primals_in)
+  inst_primals_in, inst_tangents_in = split_list(inst_in, [len(in_zeros)])
+  primal_vars_in, tangent_vars_in = split_list(eqn.invars, [len(in_zeros)])
+
+  fwd_jaxpr, fwd_consts = eqn.params["fwd_jaxpr_thunk"].call_wrapped()
+  out_tree, res_tree = eqn.params["out_trees"]()
+  num_res = res_tree.num_leaves
+  primal_vars_out = eqn.outvars[:out_tree.num_leaves]
+
+  newvar = core.gensym()
+  residuals = [newvar(v.aval) for v in fwd_jaxpr.outvars[:num_res]]
+
+  eqn_known = pe.new_jaxpr_eqn(
+      primal_vars_in, [*residuals, *primal_vars_out], core.closed_call_p,
+      dict(call_jaxpr=core.ClosedJaxpr(fwd_jaxpr, fwd_consts)),
+      fwd_jaxpr.effects, eqn.source_info, eqn.ctx)
+  print(eqn_known)
+  assert 0
+
+  # jaxpr_known, jaxpr_staged, unks_out, inst_out, num_res = \
+  #     pe.partial_eval_jaxpr_custom(fwd_jaxpr, unk_primals_in, inst_primals_in,
+  #                                  False, False, saveable)
+  print(num_res)
+
+  # print(unks_in)
+  # print(inst_in)
+  # print(eqn)
+  assert 0
+pe.partial_eval_jaxpr_custom_rules[jvp_of_custom_ad_call_p] = \
+    _jvp_of_custom_ad_call_pe_jaxpr_custom_rule
+
+
+def custom_jvp(fun, nondiff_argnums=()):
+  return custom_ad(fun, nondiff_argnums=nondiff_argnums)
+
+def custom_vjp(fun, nondiff_argnums=()):
+  return custom_ad(fun, nondiff_argnums=nondiff_argnums)

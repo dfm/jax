@@ -594,6 +594,31 @@ class BatchTrace(Trace):
     src = source_info_util.current()
     return [BatchTracer(self, v, d, src) for v, d in zip(out_vals, out_dims)]
 
+  def process_custom_ad_call(self, prim, fun, jvp, fwd, bwd, tracers, *,
+                             symbolic_zeros, out_trees):
+    in_vals, in_dims = unzip2(map(self.to_batch_info, tracers))
+    fun, out_dims1 = batch_subtrace(fun, self.tag, self.axis_data, in_dims)
+    out_dim_auxes = []
+    if jvp is not None:
+      jvp, out_dims2 = batch_custom_jvp_subtrace(jvp, self.tag, self.axis_data, in_dims)
+      out_dim_auxes.append(out_dims2)
+
+    if fwd is not None:
+      fwd_in_dims = [d for in_dim in in_dims for d in [in_dim, not_mapped]]
+      fwd, out_dims2 = batch_subtrace(fwd, self.tag, self.axis_data, fwd_in_dims)
+      bwd = batch_custom_vjp_bwd(bwd, self.tag, self.axis_data, out_dims2, in_dims)
+      out_dim_auxes.append(out_dims2)
+
+    out_vals = prim.bind_with_trace(
+        self.parent_trace, (fun, jvp, fwd, bwd, *in_vals),
+        dict(symbolic_zeros=symbolic_zeros, out_trees=out_trees))
+    idx, out_dims = lu.merge_linear_aux(out_dims1, *out_dim_auxes)
+    if fwd is not None and idx == len(out_dim_auxes):
+      _, res_tree = out_trees()
+      _, out_dims = split_list(out_dims, [res_tree.num_leaves])
+    src = source_info_util.current()
+    return [BatchTracer(self, v, d, src) for v, d in zip(out_vals, out_dims)]
+
 ### API for batching callables with vmappable inputs and outputs
 
 def batch(fun: lu.WrappedFun, axis_data,

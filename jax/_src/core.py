@@ -673,6 +673,18 @@ class Trace(Generic[TracerType]):
            "to handle custom_vjp primitives")
     raise NotImplementedError(msg)
 
+  def process_custom_ad_call(self, primitive, fun, jvp, fwd, bwd, tracers, *,
+                             out_trees, symbolic_zeros):
+    msg = (f"{type(self)} must override process_custom_ad_call to handle "
+           "custom_ad primitives")
+    raise NotImplementedError(msg)
+
+  def process_jvp_of_custom_ad_call(self, primitive, fun, jvp, fwd, bwd,
+                                    tracers, *, out_trees, symbolic_zeros):
+    msg = (f"{type(self)} must override process_jvp_of_custom_ad_call to handle "
+           "custom_ad primitives")
+    raise NotImplementedError(msg)
+
   # TODO(dougalm): deprecate/delete
   def full_raise(self, x):
     return x
@@ -1053,6 +1065,17 @@ class EvalTrace(Trace):
   def process_custom_vjp_call(self, primitive, fun, fwd, bwd, tracers, **_):  # pytype: disable=signature-mismatch
     del primitive, fwd, bwd, _  # Unused.
     return fun.call_wrapped(*tracers)
+
+  def process_custom_ad_call(self, primitive, fun, jvp, fwd, bwd, tracers, **_):  # pytype: disable=signature-mismatch
+    del primitive, jvp, fwd, bwd, _  # Unused.
+    return fun.call_wrapped(*tracers)
+
+  def process_jvp_of_custom_ad_call(self, primitive, fun, jvp, fwd, bwd, tracers, **_):  # pytype: disable=signature-mismatch
+    del primitive, fun, fwd, bwd, _  # Unused.
+    if jvp is None:
+      raise TypeError("can't apply forward-mode autodiff (jvp) to a custom_vjp "
+                      "function.")
+    return jvp.call_wrapped(*tracers)
 
 
 class TraceTag:

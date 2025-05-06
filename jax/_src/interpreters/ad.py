@@ -573,6 +573,35 @@ class JVPTrace(Trace):
           out_avals=avals_out, symbolic_zeros=symbolic_zeros, in_zeros=in_zeros)
     return map(partial(maybe_jvp_tracer, self), primals_out, tangents_out)
 
+  def process_custom_ad_call(self, prim, fun, jvp, fwd, bwd, tracers, *,
+                             symbolic_zeros, out_trees):
+    primals_in, tangents_in = unzip2(map(self.to_primal_tangent_pair, tracers))
+    if all(type(t) is Zero for t in tangents_in):
+      return prim.bind_with_trace(
+          self.parent_trace, (fun, jvp, fwd, bwd, *primals_in),
+          dict(symbolic_zeros=symbolic_zeros, out_trees=out_trees))
+
+    if fwd is None:
+      # When the fwd rule is not defined, we don't need to defer evaluation, and
+      # we can just call the JVP rule now.
+      if not symbolic_zeros:
+        tangents_in = map(instantiate_zeros, tangents_in)
+      else:
+        tangents_in = map(replace_internal_symbolic_zeros, tangents_in)
+      with core.set_current_trace(self.parent_trace):
+        outs = jvp.call_wrapped(*(tuple(primals_in) + tuple(tangents_in)))
+    else:
+      in_zeros = tuple(type(t) is Zero for t in tangents_in)
+      nz_tangents_in = [t for z, t in zip(in_zeros, tangents_in) if not z]
+      jvp_params = dict(
+          out_trees=out_trees, symbolic_zeros=symbolic_zeros, in_zeros=in_zeros)
+      outs = prim.jvp_of.bind_with_trace(
+          self.parent_trace, (fun, jvp, fwd, bwd, *primals_in, *nz_tangents_in),
+          jvp_params)
+    primals_out, tangents_out = split_list(outs, [len(outs) // 2])
+    tangents_out = map(replace_rule_output_symbolic_zeros, tangents_out)
+    return map(partial(maybe_jvp_tracer, self), primals_out, tangents_out)
+
   def process_custom_transpose(self, prim, call, tracers, **params):
     ps_in, ts_in = unzip2(map(self.to_primal_tangent_pair, tracers))
     res_ps_in, lin_ps_in = split_list(ps_in, [params['res_tree'].num_leaves])
