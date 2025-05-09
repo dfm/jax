@@ -42,6 +42,15 @@ jax_multiplatform_test(
 )
 
 jax_multiplatform_test(
+    name = "custom_api_test",
+    srcs = ["custom_api_test.py"],
+    shard_count = 10,
+    deps = [
+        "//jax:experimental",
+    ],
+)
+
+jax_multiplatform_test(
     name = "debug_info_test",
     srcs = ["debug_info_test.py"],
     enable_configs = ["tpu_v3_x4"],
